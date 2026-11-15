@@ -1,0 +1,13 @@
+[package]
+name = "calcite-login"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Calcite's Microsoft sign-in window"
+
+# A separate, short-lived process: the main app never loads a web engine.
+# It exits as soon as sign-in finishes, so its memory is returned right away.
+[dependencies]
+tao = "0.36.0"
+wry = "0.56.1"
+url.workspace = true

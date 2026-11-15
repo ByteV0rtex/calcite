@@ -1,0 +1,242 @@
+diff --git a/packages/app-lib/Cargo.toml b/packages/app-lib/Cargo.toml
+index 816d7ee..2746dbc 100644
+--- a/packages/app-lib/Cargo.toml
++++ b/packages/app-lib/Cargo.toml
+@@ -144,6 +144,8 @@ winreg = { workspace = true }
+ cli = ["dep:indicatif"]
+ export-ts = ["dep:postcard-bindgen", "dep:ts-rs"]
+ tauri = ["dep:postcard", "dep:tauri"]
++# Deliver backend events to a native (non-webview) frontend through a callback.
++native-events = []
+ 
+ [lints]
+ workspace = true
+diff --git a/packages/app-lib/src/event/emit.rs b/packages/app-lib/src/event/emit.rs
+index ab8bd01..bf5105c 100644
+--- a/packages/app-lib/src/event/emit.rs
++++ b/packages/app-lib/src/event/emit.rs
+@@ -1,5 +1,5 @@
+ use super::{FriendPayload, LoadingBarId};
+-#[cfg(feature = "tauri")]
++#[cfg(any(feature = "tauri", feature = "native-events"))]
+ use crate::event::{
+     AppEvent, InstanceGroupsChangedPayload, InstancePayload, LoadingPayload,
+     ProcessPayload, WarningPayload,
+@@ -132,7 +132,7 @@ pub fn emit_loading(
+         }
+ 
+         //Emit event to tauri
+-        #[cfg(feature = "tauri")]
++        #[cfg(any(feature = "tauri", feature = "native-events"))]
+         event_state.send(AppEvent::Loading(LoadingPayload {
+             fraction: if display_frac >= 1.0 {
+                 None // by convention, when its done, we submit None
+@@ -145,7 +145,7 @@ pub fn emit_loading(
+             loader_uuid: loading_bar.loading_bar_uuid.to_string(),
+         }))?;
+ 
+-        #[cfg(not(any(feature = "cli", feature = "tauri")))]
++        #[cfg(not(any(feature = "cli", feature = "tauri", feature = "native-events")))]
+         let _ = message;
+ 
+         loading_bar.last_sent = display_frac;
+@@ -156,7 +156,7 @@ pub fn emit_loading(
+ 
+ // emit_warning(message)
+ pub async fn emit_warning(message: &str) -> crate::Result<()> {
+-    #[cfg(feature = "tauri")]
++    #[cfg(any(feature = "tauri", feature = "native-events"))]
+     if let Some(event_state) = crate::EventState::try_get() {
+         event_state.send(AppEvent::Warning(WarningPayload {
+             message: message.to_string(),
+@@ -171,11 +171,12 @@ pub async fn emit_warning(message: &str) -> crate::Result<()> {
+ // Generally used for url deep links and file opens that we want to handle in the frontend
+ pub async fn emit_command(command: CommandPayload) -> crate::Result<()> {
+     tracing::debug!("Command: {}", serde_json::to_string(&command)?);
+-    #[cfg(feature = "tauri")]
++    #[cfg(any(feature = "tauri", feature = "native-events"))]
+     {
+         let event_state = crate::EventState::get();
+         event_state.send(AppEvent::Command(command))?;
+ 
++        #[cfg(feature = "tauri")]
+         if let Some(window) = event_state.app.get_window("main") {
+             let _ = window.set_focus();
+         }
+@@ -191,7 +192,7 @@ pub async fn emit_process(
+     event: ProcessPayloadType,
+     message: &str,
+ ) -> crate::Result<()> {
+-    #[cfg(feature = "tauri")]
++    #[cfg(any(feature = "tauri", feature = "native-events"))]
+     {
+         let event_state = crate::EventState::get();
+         event_state.send(AppEvent::Process(ProcessPayload {
+@@ -210,7 +211,7 @@ pub async fn emit_instance(
+     instance_id: &str,
+     event: InstancePayloadType,
+ ) -> crate::Result<()> {
+-    #[cfg(feature = "tauri")]
++    #[cfg(any(feature = "tauri", feature = "native-events"))]
+     {
+         let event_state = crate::EventState::get();
+         event_state.send(AppEvent::Instance(InstancePayload {
+@@ -225,7 +226,7 @@ pub async fn emit_instance(
+ pub async fn emit_instance_groups_changed(
+     instance_ids: &[String],
+ ) -> crate::Result<()> {
+-    #[cfg(feature = "tauri")]
++    #[cfg(any(feature = "tauri", feature = "native-events"))]
+     {
+         let event_state = crate::EventState::get();
+         event_state.send(AppEvent::InstanceGroupsChanged(
+@@ -241,7 +242,7 @@ pub async fn emit_instance_groups_changed(
+ pub async fn emit_onboarding_checklist(
+     checklist: OnboardingChecklist,
+ ) -> crate::Result<()> {
+-    #[cfg(feature = "tauri")]
++    #[cfg(any(feature = "tauri", feature = "native-events"))]
+     {
+         let event_state = crate::EventState::get();
+         event_state.send(AppEvent::OnboardingChecklist(checklist))?;
+@@ -251,7 +252,7 @@ pub async fn emit_onboarding_checklist(
+ 
+ #[allow(unused_variables)]
+ pub async fn emit_friend(payload: FriendPayload) -> crate::Result<()> {
+-    #[cfg(feature = "tauri")]
++    #[cfg(any(feature = "tauri", feature = "native-events"))]
+     {
+         let event_state = crate::EventState::get();
+         event_state.send(AppEvent::Friend(payload))?;
+@@ -262,7 +263,7 @@ pub async fn emit_friend(payload: FriendPayload) -> crate::Result<()> {
+ 
+ #[allow(unused_variables)]
+ pub async fn emit_notification(payload: Value) -> crate::Result<()> {
+-    #[cfg(feature = "tauri")]
++    #[cfg(any(feature = "tauri", feature = "native-events"))]
+     {
+         let event_state = crate::EventState::get();
+         event_state
+diff --git a/packages/app-lib/src/event/mod.rs b/packages/app-lib/src/event/mod.rs
+index 4e8eb05..61944ff 100644
+--- a/packages/app-lib/src/event/mod.rs
++++ b/packages/app-lib/src/event/mod.rs
+@@ -18,6 +18,13 @@ pub mod emit;
+ // Global event state
+ // Stores the Tauri app handle and other event-related state variables
+ static EVENT_STATE: OnceCell<Arc<EventState>> = OnceCell::const_new();
++
++/// Callback that receives every backend event when built with `native-events`.
++#[cfg(all(feature = "native-events", not(feature = "tauri")))]
++pub type NativeEventSink = Box<dyn Fn(AppEvent) + Send + Sync + 'static>;
++#[cfg(all(feature = "native-events", not(feature = "tauri")))]
++static NATIVE_EVENT_SINK: std::sync::OnceLock<NativeEventSink> =
++    std::sync::OnceLock::new();
+ pub struct EventState {
+     /// Tauri app
+     #[cfg(feature = "tauri")]
+@@ -83,6 +90,26 @@ impl EventState {
+         Ok(())
+     }
+ 
++    #[cfg(all(feature = "native-events", not(feature = "tauri")))]
++    pub(crate) fn try_get() -> Option<Arc<Self>> {
++        EVENT_STATE.get().cloned()
++    }
++
++    /// Route backend events to a native (non-webview) frontend.
++    /// Call once, before `EventState::init` / `State::init`.
++    #[cfg(all(feature = "native-events", not(feature = "tauri")))]
++    pub fn set_native_sink(sink: NativeEventSink) {
++        let _ = NATIVE_EVENT_SINK.set(sink);
++    }
++
++    #[cfg(all(feature = "native-events", not(feature = "tauri")))]
++    pub fn send(&self, event: AppEvent) -> crate::Result<()> {
++        if let Some(sink) = NATIVE_EVENT_SINK.get() {
++            sink(event);
++        }
++        Ok(())
++    }
++
+     // Values provided should not be used directly, as they are clones and are not guaranteed to be up-to-date
+     pub async fn list_progress_bars() -> crate::Result<DashMap<Uuid, LoadingBar>>
+     {
+diff --git a/packages/app-lib/src/install/events.rs b/packages/app-lib/src/install/events.rs
+index dbc61a4..7b32eeb 100644
+--- a/packages/app-lib/src/install/events.rs
++++ b/packages/app-lib/src/install/events.rs
+@@ -203,7 +203,7 @@ impl InstallProgressReporterState {
+ pub async fn emit_install_job(
+     snapshot: &InstallJobSnapshot,
+ ) -> crate::Result<()> {
+-    #[cfg(feature = "tauri")]
++    #[cfg(any(feature = "tauri", feature = "native-events"))]
+     {
+         let result: crate::Result<()> = (|| {
+             let event_state = crate::EventState::get();
+diff --git a/packages/app-lib/src/lib.rs b/packages/app-lib/src/lib.rs
+index 0e2c04a..46725a8 100644
+--- a/packages/app-lib/src/lib.rs
++++ b/packages/app-lib/src/lib.rs
+@@ -12,7 +12,11 @@ mod util;
+ 
+ mod api;
+ mod error;
++#[cfg(not(feature = "native-events"))]
+ mod event;
++// Native frontends match on the event payload types directly.
++#[cfg(feature = "native-events")]
++pub mod event;
+ pub mod install;
+ mod launcher;
+ mod logger;
+diff --git a/packages/app-lib/src/state/process.rs b/packages/app-lib/src/state/process.rs
+index ea85747..f50854e 100644
+--- a/packages/app-lib/src/state/process.rs
++++ b/packages/app-lib/src/state/process.rs
+@@ -2,7 +2,7 @@ use crate::ErrorKind;
+ use crate::State;
+ use crate::event::emit::{emit_instance, emit_process};
+ use crate::event::{InstancePayloadType, ProcessPayloadType};
+-#[cfg(feature = "tauri")]
++#[cfg(any(feature = "tauri", feature = "native-events"))]
+ use crate::event::{LogEvent, LogPayload};
+ use crate::util::io::IOError;
+ use crate::util::rpc::RpcServer;
+@@ -748,7 +748,7 @@ impl Process {
+             }
+         }
+ 
+-        #[cfg(feature = "tauri")]
++        #[cfg(any(feature = "tauri", feature = "native-events"))]
+         {
+             let event_state = crate::EventState::get();
+             let _ = event_state.send(crate::event::AppEvent::Log(LogPayload {
+@@ -756,7 +756,7 @@ impl Process {
+                 event: LogEvent::Log4j(event.clone()),
+             }));
+         }
+-        #[cfg(not(feature = "tauri"))]
++        #[cfg(not(any(feature = "tauri", feature = "native-events")))]
+         {
+             let _ = (instance_id, event);
+         }
+@@ -765,7 +765,7 @@ impl Process {
+     fn emit_legacy_log(instance_id: &str, message: &str) {
+         push_log_line(instance_id, message.to_string());
+ 
+-        #[cfg(feature = "tauri")]
++        #[cfg(any(feature = "tauri", feature = "native-events"))]
+         {
+             let event_state = crate::EventState::get();
+             let _ = event_state.send(crate::event::AppEvent::Log(LogPayload {
+@@ -775,7 +775,7 @@ impl Process {
+                 },
+             }));
+         }
+-        #[cfg(not(feature = "tauri"))]
++        #[cfg(not(any(feature = "tauri", feature = "native-events")))]
+         {
+             let _ = (instance_id, message);
+         }

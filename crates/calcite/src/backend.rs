@@ -1,0 +1,103 @@
+//! The bridge between the GPUI interface and Modrinth's async launcher backend.
+//!
+//! The backend (`theseus`) is built on tokio. GPUI has its own executor. We
+//! keep them apart: backend work runs on a small dedicated tokio runtime, and
+//! the UI awaits its `JoinHandle`, which is executor-agnostic. Backend events
+//! arrive through a channel and are drained by a single UI task, so nothing in
+//! the interface ever polls.
+
+use std::future::Future;
+use std::sync::Arc;
+
+use anyhow::{Context as _, anyhow};
+use futures::channel::mpsc;
+use gpui_kit::{App, Global};
+use theseus::AppEvent;
+
+/// Name of the data folder under the platform's app-data directory.
+/// Development builds use a separate folder so they never touch real data.
+pub fn data_id() -> String {
+    if let Ok(id) = std::env::var("CALCITE_DATA_ID")
+        && !id.trim().is_empty()
+    {
+        return id;
+    }
+    if cfg!(debug_assertions) {
+        "CalciteDev".into()
+    } else {
+        "Calcite".into()
+    }
+}
+
+#[derive(Clone)]
+pub struct Backend {
+    runtime: Arc<tokio::runtime::Runtime>,
+}
+
+impl Global for Backend {}
+
+impl Backend {
+    /// Start the runtime and route backend events into a channel that the
+    /// UI drains. Must run before the backend state is initialized.
+    pub fn start() -> anyhow::Result<(Self, mpsc::UnboundedReceiver<AppEvent>)> {
+        theseus::install_crypto_provider();
+
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(4)
+            .thread_name("calcite-backend")
+            .enable_all()
+            .build()
+            .context("starting the backend runtime")?;
+
+        let (tx, rx) = mpsc::unbounded();
+        theseus::EventState::set_native_sink(Box::new(move |event| {
+            // The receiver only goes away when the app is quitting.
+            let _ = tx.unbounded_send(event);
+        }));
+
+        Ok((
+            Backend {
+                runtime: Arc::new(runtime),
+            },
+            rx,
+        ))
+    }
+
+    /// Run `future` on the backend runtime. The returned future can be
+    /// awaited from any executor, including GPUI's.
+    pub fn run<T, F>(&self, future: F) -> impl Future<Output = anyhow::Result<T>> + use<T, F>
+    where
+        T: Send + 'static,
+        F: Future<Output = T> + Send + 'static,
+    {
+        let handle = self.runtime.spawn(future);
+        async move {
+            handle
+                .await
+                .map_err(|e| anyhow!("backend task failed: {e}"))
+        }
+    }
+
+    /// Like [`Backend::run`] for backend calls that return `theseus::Result`.
+    pub fn call<T, F>(&self, future: F) -> impl Future<Output = anyhow::Result<T>> + use<T, F>
+    where
+        T: Send + 'static,
+        F: Future<Output = theseus::Result<T>> + Send + 'static,
+    {
+        let task = self.run(future);
+        async move { task.await?.map_err(|e| anyhow!("{e}")) }
+    }
+
+    /// Initialize the backend state (database, settings, file watchers).
+    pub fn init_state(&self) -> impl Future<Output = anyhow::Result<()>> + use<> {
+        let id = data_id();
+        self.call(async move {
+            theseus::EventState::init().await?;
+            theseus::State::init(id).await
+        })
+    }
+
+    pub fn global(cx: &App) -> &Backend {
+        cx.global::<Backend>()
+    }
+}

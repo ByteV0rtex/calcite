@@ -1,0 +1,9 @@
+[env]
+# Modrinth's backend ships prepared sqlx query metadata; build without a live DB.
+SQLX_OFFLINE = "true"
+# Version reported to Modrinth and to the game as the launcher version.
+CALCITE_VERSION = "0.1.0"
+
+# Windows: the backend recurses deeply when installing packs; match upstream's larger stack.
+[target."cfg(windows)"]
+rustflags = ["-C", "link-args=/STACK:16777220"]

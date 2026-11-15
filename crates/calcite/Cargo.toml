@@ -1,0 +1,37 @@
+[package]
+name = "calcite"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "A fast, native Minecraft launcher"
+
+[[bin]]
+name = "calcite"
+path = "src/main.rs"
+
+[features]
+# Dev-only: `calcite --snapshot <page> <out.png>` renders a page to an image.
+snapshot = ["dep:gpui-pre", "dep:gpui-pre-platform"]
+
+[dependencies]
+gpui-kit = "=0.9.1"
+# Only for the dev snapshot feature: turns on offscreen rendering in GPUI itself.
+gpui-pre = { version = "=0.3.12", optional = true, features = ["test-support"] }
+gpui-pre-platform = { version = "=0.3.12", optional = true, features = ["test-support"] }
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+futures.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+reqwest.workspace = true
+image.workspace = true
+parking_lot.workspace = true
+rust-embed.workspace = true
+smallvec.workspace = true
+url.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+calcite-core = { path = "../calcite-core" }
+theseus = { path = "../../vendor/modrinth/packages/app-lib", features = ["native-events"] }

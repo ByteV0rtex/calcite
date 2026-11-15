@@ -1,0 +1,45 @@
+# Calcite
+
+A fast, native Minecraft launcher for macOS, Windows and Linux.
+
+- **Native.** Rust and GPUI, no webview. Idles at about 0% CPU and a fraction of the RAM of webview launchers.
+- **Everything you expect.** Instances, every mod loader, Modrinth modpacks, mods, resource packs and shaders, Microsoft accounts, managed Java.
+- **More than a launcher.** Health checks, a crash doctor, find-the-broken-mod, snapshots with rollback, world backups, deduplicated storage, local servers. Some of these are still on the way (see the milestones below).
+- **No ads, no purchases, no telemetry.**
+
+## Building
+
+You need Rust (stable), a JDK (17 or newer, used by the backend's build), and on
+macOS the Xcode command line tools.
+
+```bash
+scripts/sync-backend.sh          # fetch + patch the launcher backend (version in BACKEND_VERSION)
+cargo run -p calcite             # debug build, uses a separate "CalciteDev" data folder
+cargo build --release -p calcite # release build, uses the "Calcite" data folder
+```
+
+Development helpers:
+
+```bash
+cargo run -p calcite --features snapshot -- --snapshot library out.png   # render a page to PNG
+CALCITE_DATA_ID=SomeOtherFolder cargo run -p calcite                      # pick a data folder
+```
+
+## How it's put together
+
+Calcite's launching, installing and account code comes from Modrinth's
+open-source launcher backend (`theseus`, GPL-3.0), which Calcite pins and
+patches (`patches/`). The interface, the browsing client and every feature
+beyond Modrinth App are Calcite's own.
+
+```
+crates/calcite        GPUI app: shell, pages, theme, image cache, backend bridge
+crates/calcite-core   UI-independent logic (Modrinth API client, and later health
+                      checks, crash doctor, snapshots, transfer from other launchers)
+crates/calcite-login  small helper window for Microsoft sign-in
+```
+
+## License
+
+GPL-3.0-only. Calcite isn't affiliated with Modrinth, Mojang or Microsoft.
+Fonts: Inter and JetBrains Mono (SIL OFL). Icons: Lucide (ISC).

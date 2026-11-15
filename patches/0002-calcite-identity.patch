@@ -1,0 +1,40 @@
+diff --git a/packages/app-lib/src/launcher/args.rs b/packages/app-lib/src/launcher/args.rs
+index 3906ad2..6a52be9 100644
+--- a/packages/app-lib/src/launcher/args.rs
++++ b/packages/app-lib/src/launcher/args.rs
+@@ -230,8 +230,8 @@ fn parse_jvm_argument(
+                 .to_string_lossy(),
+         )
+         .replace("${classpath_separator}", classpath_separator(java_arch))
+-        .replace("${launcher_name}", "theseus")
+-        .replace("${launcher_version}", env!("CARGO_PKG_VERSION"))
++        .replace("${launcher_name}", "calcite")
++        .replace("${launcher_version}", env!("CALCITE_VERSION"))
+         .replace("${version_name}", version_name)
+         .replace("${classpath}", class_paths))
+ }
+diff --git a/packages/app-lib/src/lib.rs b/packages/app-lib/src/lib.rs
+index 0e2c04a..52e7830 100644
+--- a/packages/app-lib/src/lib.rs
++++ b/packages/app-lib/src/lib.rs
+@@ -39,12 +39,13 @@ pub fn install_crypto_provider() {
+ }
+ 
+ pub fn launcher_user_agent() -> String {
+-    const LAUNCHER_BASE_USER_AGENT: &str =
+-        concat!("modrinth/theseus/", env!("CARGO_PKG_VERSION"),);
++    // Calcite is a separate launcher built on this backend; identify it as such
++    // so Modrinth's API sees honest client information.
++    const LAUNCHER_BASE_USER_AGENT: &str = concat!(
++        "calcite-launcher/",
++        env!("CALCITE_VERSION"),
++        " (based on modrinth/theseus)"
++    );
+ 
+-    format!(
+-        "{} ({}; support@modrinth.com)",
+-        LAUNCHER_BASE_USER_AGENT,
+-        std::env::consts::OS
+-    )
++    format!("{} ({})", LAUNCHER_BASE_USER_AGENT, std::env::consts::OS)
+ }
