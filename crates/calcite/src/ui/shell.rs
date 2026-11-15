@@ -76,6 +76,7 @@ pub struct Shell {
     project_page: Option<Entity<ProjectPage>>,
     move_in: Option<Entity<MoveInPage>>,
     game_settings: Option<Entity<crate::ui::pages::game_settings::GameSettings>>,
+    storage: Option<Entity<crate::ui::pages::storage::StoragePage>>,
     dialog: Option<gpui_kit::AnyView>,
     pub library_filter: Entity<InputState>,
     pub library_sort: LibrarySort,
@@ -118,6 +119,7 @@ impl Shell {
             project_page: None,
             move_in: None,
             game_settings: None,
+            storage: None,
             dialog: None,
             library_filter,
             library_sort: LibrarySort::LastPlayed,
@@ -188,6 +190,22 @@ impl Shell {
         }
         if route == Route::Settings(SettingsSection::MoveIn) {
             self.ensure_move_in(window, cx);
+        }
+        // Storage is measured fresh each time it's opened.
+        if route == Route::Settings(SettingsSection::Storage) && self.route != route {
+            use crate::ui::pages::storage::{StorageEvent, StoragePage};
+            let page = cx.new(StoragePage::new);
+            cx.subscribe_in(
+                &page,
+                window,
+                |this, _, event: &StorageEvent, window, cx| match event {
+                    StorageEvent::OpenInstance(id) => {
+                        this.navigate(Route::Instance(id.clone()), window, cx)
+                    }
+                },
+            )
+            .detach();
+            self.storage = Some(page);
         }
         self.route = route;
         self.account_menu_open = false;
@@ -319,6 +337,12 @@ impl Shell {
 
     /// Run `f` against the open instance page, if one is showing.
     #[allow(dead_code)]
+    #[cfg_attr(not(feature = "snapshot"), allow(dead_code))]
+    pub fn storage_page(&self) -> Option<Entity<crate::ui::pages::storage::StoragePage>> {
+        self.storage.clone()
+    }
+
+    #[cfg_attr(not(feature = "snapshot"), allow(dead_code))]
     pub fn with_instance_page(
         &mut self,
         cx: &mut Context<Self>,
@@ -1006,7 +1030,8 @@ impl Shell {
             Route::Settings(section) => {
                 let move_in = self.move_in.clone();
                 let game = self.game_settings.clone();
-                settings::render(self, section, move_in, game, window, cx)
+                let storage = self.storage.clone();
+                settings::render(self, section, move_in, game, storage, window, cx)
             }
             Route::Gallery => gallery::render(self, window, cx),
         }

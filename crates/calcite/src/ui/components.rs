@@ -257,6 +257,57 @@ pub fn icon_chip(icon_name: &str, text: impl Into<SharedString>, cx: &App) -> gp
         .child(text.into())
 }
 
+/// A chip with a tiny bar sparkline: the live game monitor's readout.
+/// `values` are oldest first; bars scale to `max`.
+pub fn sparkline_chip(
+    icon_name: &str,
+    text: impl Into<SharedString>,
+    values: &[f32],
+    max: f32,
+    cx: &App,
+) -> gpui_kit::Div {
+    const BARS: usize = 30;
+    const HEIGHT: f32 = 12.0;
+    let p = cx.palette();
+    let max = max.max(f32::EPSILON);
+    let start = values.len().saturating_sub(BARS);
+    let shown = &values[start..];
+    let empty = BARS - shown.len();
+    let bars = (0..empty)
+        .map(|_| 0.0)
+        .chain(shown.iter().copied())
+        .map(|v| {
+            let h = (v / max).clamp(0.0, 1.0) * HEIGHT;
+            div()
+                .w(px(2.0))
+                .h(px(h.max(1.0)))
+                .rounded(px(1.0))
+                .bg(if v > 0.0 { p.accent } else { p.border })
+        });
+    div()
+        .flex()
+        .flex_none()
+        .items_center()
+        .gap(space(1.5))
+        .h(px(20.0))
+        .px(space(1.75))
+        .rounded(px(radius::SM))
+        .bg(p.raised)
+        .text_size(px(type_scale::CAPTION))
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(p.text_secondary)
+        .child(icon(icon_name, 12.0, p.text_muted))
+        .child(div().min_w(px(44.0)).child(text.into()))
+        .child(
+            div()
+                .flex()
+                .items_end()
+                .gap(px(1.0))
+                .h(px(HEIGHT))
+                .children(bars),
+        )
+}
+
 /// A tinted chip communicating state (running, update available, issue).
 pub fn state_chip(text: impl Into<SharedString>, fg: Hsla, bg: Hsla) -> gpui_kit::Div {
     div()

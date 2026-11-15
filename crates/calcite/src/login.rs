@@ -73,14 +73,21 @@ pub fn sign_in(cx: &mut App) {
             let uri = flow.auth_request_uri.clone();
             let output = backend
                 .run(async move {
-                    tokio::process::Command::new(helper)
+                    // Hold the helper's stdin open while we wait: if Calcite
+                    // exits, the pipe closes and the window closes with it.
+                    let mut child = tokio::process::Command::new(helper)
                         .arg(uri)
                         .arg(REDIRECT_PREFIX)
+                        .env("CALCITE_LOGIN_WATCH_STDIN", "1")
+                        .stdin(Stdio::piped())
                         .stdout(Stdio::piped())
                         .stderr(Stdio::piped())
                         .kill_on_drop(true)
-                        .output()
-                        .await
+                        .spawn()?;
+                    let stdin = child.stdin.take();
+                    let output = child.wait_with_output().await;
+                    drop(stdin);
+                    output
                 })
                 .await??;
             match output.status.code() {

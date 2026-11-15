@@ -77,7 +77,12 @@ pub fn loader_name(loader: ModLoader) -> &'static str {
 #[derive(Clone, Debug)]
 pub struct Running {
     pub started: DateTime<Utc>,
+    /// The last minute of memory/CPU readings, oldest first.
+    pub usage: VecDeque<calcite_core::monitor::Sample>,
 }
+
+/// How many one-second readings the live monitor keeps.
+pub const USAGE_HISTORY: usize = 60;
 
 #[derive(Clone, Debug)]
 pub struct Job {
@@ -356,12 +361,8 @@ impl AppState {
             AppEvent::Process(payload) => match payload.event {
                 ProcessPayloadType::Launched => {
                     self.logs.remove(&payload.instance_id);
-                    self.running.insert(
-                        payload.instance_id,
-                        Running {
-                            started: Utc::now(),
-                        },
-                    );
+                    self.running.remove(&payload.instance_id);
+                    self.mark_running(payload.instance_id, Utc::now(), cx);
                 }
                 ProcessPayloadType::Finished => {
                     let started = self.running.remove(&payload.instance_id).map(|r| r.started);
@@ -431,6 +432,64 @@ impl AppState {
         }
     }
 
+    /// Record a running game and watch its memory and CPU once a second
+    /// until it exits. Does nothing if it's already known.
+    fn mark_running(
+        &mut self,
+        instance_id: String,
+        started: DateTime<Utc>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.running.contains_key(&instance_id) {
+            return;
+        }
+        self.running.insert(
+            instance_id.clone(),
+            Running {
+                started,
+                usage: VecDeque::with_capacity(USAGE_HISTORY),
+            },
+        );
+        let id = instance_id.clone();
+        let dir =
+            Backend::global(cx).call(async move { theseus::instance::get_full_path(&id).await });
+        cx.spawn(async move |this, cx| {
+            let Ok(dir) = dir.await else { return };
+            let mut monitor = calcite_core::monitor::GameMonitor::new(&dir);
+            loop {
+                cx.background_executor().timer(Duration::from_secs(1)).await;
+                let still_running = this
+                    .read_with(cx, |this, _| {
+                        this.running
+                            .get(&instance_id)
+                            .is_some_and(|r| r.started == started)
+                    })
+                    .unwrap_or(false);
+                if !still_running {
+                    return;
+                }
+                let (back, sample) = cx
+                    .background_spawn(async move {
+                        let sample = monitor.sample();
+                        (monitor, sample)
+                    })
+                    .await;
+                monitor = back;
+                let Some(sample) = sample else { continue };
+                let _ = this.update(cx, |this, cx| {
+                    if let Some(running) = this.running.get_mut(&instance_id) {
+                        if running.usage.len() == USAGE_HISTORY {
+                            running.usage.pop_front();
+                        }
+                        running.usage.push_back(sample);
+                        cx.notify();
+                    }
+                });
+            }
+        })
+        .detach();
+    }
+
     /// Coalesce bursts of change events into one refresh.
     fn schedule_refresh(&mut self, cx: &mut Context<Self>) {
         if self.status != BackendStatus::Ready {
@@ -479,9 +538,7 @@ impl AppState {
                     this.accounts = accounts;
                     this.default_account = default;
                     for p in processes {
-                        this.running.entry(p.instance_id).or_insert(Running {
-                            started: p.start_time,
-                        });
+                        this.mark_running(p.instance_id, p.start_time, cx);
                     }
                     cx.notify();
                 });

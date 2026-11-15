@@ -1,4 +1,4 @@
-//! Settings: Appearance, Move in, Accounts, About.
+//! Settings: Appearance, Game, Storage, Move in, Accounts, About.
 
 use gpui_kit::prelude::*;
 use gpui_kit::{
@@ -17,15 +17,17 @@ pub enum Section {
     #[default]
     Appearance,
     Game,
+    Storage,
     MoveIn,
     Accounts,
     About,
 }
 
 impl Section {
-    const ALL: [Section; 5] = [
+    const ALL: [Section; 6] = [
         Section::Appearance,
         Section::Game,
+        Section::Storage,
         Section::MoveIn,
         Section::Accounts,
         Section::About,
@@ -34,6 +36,7 @@ impl Section {
         match self {
             Section::Appearance => "Appearance",
             Section::Game => "Game",
+            Section::Storage => "Storage",
             Section::MoveIn => "Move in",
             Section::Accounts => "Accounts",
             Section::About => "About",
@@ -43,6 +46,7 @@ impl Section {
         match self {
             Section::Appearance => "sun",
             Section::Game => "gamepad-2",
+            Section::Storage => "hard-drive",
             Section::MoveIn => "arrow-down-to-line",
             Section::Accounts => "user",
             Section::About => "info",
@@ -55,6 +59,7 @@ pub fn render(
     section: Section,
     move_in: Option<Entity<MoveInPage>>,
     game: Option<Entity<crate::ui::pages::game_settings::GameSettings>>,
+    storage: Option<Entity<crate::ui::pages::storage::StoragePage>>,
     _window: &mut Window,
     cx: &mut Context<Shell>,
 ) -> AnyElement {
@@ -109,6 +114,10 @@ pub fn render(
 
     let body: AnyElement = match section {
         Section::Game => match game {
+            Some(page) => page.into_any_element(),
+            None => div().into_any_element(),
+        },
+        Section::Storage => match storage {
             Some(page) => page.into_any_element(),
             None => div().into_any_element(),
         },

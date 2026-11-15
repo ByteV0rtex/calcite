@@ -18,6 +18,8 @@ use wry::WebViewBuilder;
 #[derive(Debug)]
 enum Signal {
     Finished(String),
+    /// Calcite went away (its end of our stdin closed).
+    ParentGone,
 }
 
 fn main() -> ExitCode {
@@ -33,6 +35,19 @@ fn main() -> ExitCode {
 
     let event_loop = EventLoopBuilder::<Signal>::with_user_event().build();
     let proxy = event_loop.create_proxy();
+
+    // Calcite keeps our stdin open while it waits. When it closes, however
+    // Calcite exited, close the window instead of lingering.
+    if std::env::var_os("CALCITE_LOGIN_WATCH_STDIN").is_some() {
+        let proxy = event_loop.create_proxy();
+        std::thread::spawn(move || {
+            use std::io::Read;
+            let mut buf = [0u8; 64];
+            let mut stdin = std::io::stdin();
+            while matches!(stdin.read(&mut buf), Ok(n) if n > 0) {}
+            let _ = proxy.send_event(Signal::ParentGone);
+        });
+    }
 
     let window = match WindowBuilder::new()
         .with_title("Sign in with Microsoft")
@@ -80,6 +95,7 @@ fn main() -> ExitCode {
                 println!("{redirect}");
                 std::process::exit(0);
             }
+            Event::UserEvent(Signal::ParentGone) => std::process::exit(1),
             Event::WindowEvent {
                 event: WindowEvent::CloseRequested,
                 ..

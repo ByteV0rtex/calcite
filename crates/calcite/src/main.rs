@@ -119,6 +119,7 @@ fn main() {
                         "settings" => Route::Settings(ui::pages::settings::Section::Appearance),
                         "accounts" => Route::Settings(ui::pages::settings::Section::Accounts),
                         "game-settings" => Route::Settings(ui::pages::settings::Section::Game),
+                        "storage" => Route::Settings(ui::pages::settings::Section::Storage),
                         "about" => Route::Settings(ui::pages::settings::Section::About),
                         _ => Route::Home,
                     };
@@ -199,6 +200,45 @@ fn take_snapshot(window: gpui_kit::AnyWindowHandle, page: String, out: String, c
                 }
             });
         });
+        // Dev hook: comma-separated steps run before the picture is taken
+        // (`play`, `wait` = 5 s, and the "Find the broken mod" answers).
+        if let Ok(script) = std::env::var("CALCITE_SNAPSHOT_SCRIPT") {
+            wait(2500).await;
+            for word in script.split(',') {
+                let word = word.trim().to_string();
+                if word == "wait" {
+                    wait(5000).await;
+                    continue;
+                }
+                let _ = cx.update_window(window, |root, _, cx| {
+                    let Ok(root) = root.downcast::<Root>() else { return };
+                    let Some(shell) = root.read(cx).view().clone().downcast::<Shell>().ok() else {
+                        return;
+                    };
+                    shell.update(cx, |shell, cx| {
+                        if let Some(storage) = shell.storage_page() {
+                            match word.as_str() {
+                                "clean-logs" => storage.update(cx, |s, cx| s.delete_logs(cx)),
+                                "clean-store" => storage.update(cx, |s, cx| s.clean_store(cx)),
+                                _ => {}
+                            }
+                        }
+                        shell.with_instance_page(cx, |p, cx| match word.as_str() {
+                            "start" => p.start_bisect(cx),
+                            "works" => p.answer_bisect(false, cx),
+                            "broken" => p.answer_bisect(true, cx),
+                            "stop" => p.finish_bisect(Vec::new(), cx),
+                            "play" => {
+                                let id = p.id().to_string();
+                                p.state().update(cx, |s, cx| s.play(&id, cx));
+                            }
+                            _ => {}
+                        })
+                    });
+                });
+                wait(1500).await;
+            }
+        }
         wait(3500).await;
         // Draw explicitly: macOS pauses drawing for windows hidden behind others.
         let result = cx.update_window(window, |_, window, cx| {
@@ -213,7 +253,7 @@ fn take_snapshot(window: gpui_kit::AnyWindowHandle, page: String, out: String, c
             },
             Ok(Err(e)) | Err(e) => eprintln!("snapshot failed: {e:#}"),
         }
-        let _ = cx.update(|cx| cx.quit());
+        cx.update(|cx| cx.quit());
     })
     .detach();
 }

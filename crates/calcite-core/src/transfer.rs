@@ -511,8 +511,13 @@ mod tests {
             .await
             .unwrap()
             .get(0);
+        // Compare the decoded value: JSON escapes Windows backslashes.
+        let cached_icon = serde_json::from_str::<serde_json::Value>(&cached).unwrap()["icon_path"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
         assert!(
-            cached.contains(&calcite.to_string_lossy().to_string()),
+            cached_icon.starts_with(&calcite.to_string_lossy().to_string()),
             "{cached}"
         );
         let processes: i64 = sqlx::query("SELECT COUNT(*) FROM processes")

@@ -41,6 +41,7 @@ pub struct Extra {
     pub snapshots: Option<Vec<Snapshot>>,
     pub busy: Option<SharedString>,
     pub health: Option<Result<crate::ui::pages::health_tab::HealthReport, String>>,
+    pub bisect: Option<(calcite_core::bisect::Bisect, calcite_core::bisect::Step)>,
 }
 
 pub fn snapshots_dir(instance_id: &str) -> Option<PathBuf> {

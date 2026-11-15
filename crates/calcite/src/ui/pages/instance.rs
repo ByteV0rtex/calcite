@@ -14,7 +14,7 @@ use crate::state::{AppState, LogLevel, LogLine, parse_legacy_line};
 use crate::theme::{self, PaletteExt, radius, space, type_scale};
 use crate::ui::components::{
     Button, ButtonSize, chip, empty_state, icon_chip, progress_bar, relative_time, short_duration,
-    skeleton, thumb,
+    skeleton, sparkline_chip, thumb,
 };
 use crate::ui::shell::{instance_icon, running_chip};
 
@@ -177,6 +177,7 @@ impl InstancePage {
         page.load_log_buffer(cx);
         page.check_updates(cx);
         page.load_health(cx);
+        page.resume_bisect();
         page
     }
 
@@ -482,6 +483,11 @@ impl InstancePage {
             .running
             .get(&self.id)
             .map(|r| (Utc::now() - r.started).num_seconds().max(0) as u64);
+        let usage: Vec<calcite_core::monitor::Sample> = state
+            .running
+            .get(&self.id)
+            .map(|r| r.usage.iter().copied().collect())
+            .unwrap_or_default();
         let job = state.job_for(&self.id).cloned();
         let source = instance_icon(&inst);
         let busy = job.is_some() || !inst.installed;
@@ -541,6 +547,7 @@ impl InstancePage {
                             .child(
                                 div()
                                     .flex()
+                                    .flex_wrap()
                                     .items_center()
                                     .gap(space(1.5))
                                     .child(chip(inst.loader_line(), cx))
@@ -554,16 +561,46 @@ impl InstancePage {
                                             cx,
                                         ))
                                     })
-                                    .when_some(inst.last_played, |d, t| {
-                                        d.child(
-                                            div()
-                                                .text_size(px(type_scale::SMALL))
-                                                .text_color(p.text_muted)
-                                                .child(format!("Played {}", relative_time(t))),
-                                        )
-                                    })
+                                    .when_some(
+                                        inst.last_played.filter(|_| running.is_none()),
+                                        |d, t| {
+                                            d.child(
+                                                div()
+                                                    .text_size(px(type_scale::SMALL))
+                                                    .text_color(p.text_muted)
+                                                    .child(format!("Played {}", relative_time(t))),
+                                            )
+                                        },
+                                    )
                                     .when_some(running, |d, secs| d.child(running_chip(secs, cx))),
-                            ),
+                            )
+                            .when_some(usage.last().copied(), |d, now| {
+                                let memory: Vec<f32> =
+                                    usage.iter().map(|s| s.memory as f32).collect();
+                                let cpu: Vec<f32> = usage.iter().map(|s| s.cpu).collect();
+                                let memory_max = memory.iter().copied().fold(0.0, f32::max);
+                                let cpu_max = cpu.iter().copied().fold(25.0, f32::max);
+                                d.child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap(space(1.5))
+                                        .child(sparkline_chip(
+                                            "memory-stick",
+                                            calcite_core::transfer::human_bytes(now.memory),
+                                            &memory,
+                                            memory_max,
+                                            cx,
+                                        ))
+                                        .child(sparkline_chip(
+                                            "cpu",
+                                            format!("{:.0}% CPU", now.cpu),
+                                            &cpu,
+                                            cpu_max,
+                                            cx,
+                                        )),
+                                )
+                            }),
                     )
                     .child(
                         div()

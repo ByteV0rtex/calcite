@@ -9,6 +9,7 @@ pub mod library;
 pub mod move_in;
 pub mod project;
 pub mod settings;
+pub mod storage;
 
 use gpui_kit::prelude::*;
 use gpui_kit::{App, FontWeight, SharedString, div, px};
