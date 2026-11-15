@@ -203,6 +203,9 @@ pub struct AppState {
     pub logs: HashMap<String, VecDeque<LogLine>>,
     /// A message for the user that hasn't been dismissed yet.
     pub notice: Option<Notice>,
+    /// Game folders to bring into an instance once its install job succeeds
+    /// (official launcher imports), keyed by job id.
+    pending_copies: HashMap<String, (PathBuf, Option<PathBuf>)>,
     refresh_task: Option<Task<()>>,
 }
 
@@ -236,6 +239,7 @@ impl AppState {
             default_account: None,
             logs: HashMap::new(),
             notice: None,
+            pending_copies: HashMap::new(),
             refresh_task: None,
         });
         cx.set_global(AppStateHandle(state.clone()));
@@ -251,7 +255,21 @@ impl AppState {
                 if result.is_ok() { "ok" } else { "failed" }
             );
             let updated = weak.update(cx, |this, cx| match result {
-                Ok(()) => {
+                Ok(moved) => {
+                    if let Some(moved) = moved {
+                        this.notice = Some(Notice {
+                            title: format!("Welcome over from {}", moved.source).into(),
+                            body: format!(
+                                "{} instances and {} account{} came with you. {} of game files are shared with the original instead of copied.",
+                                moved.instances,
+                                moved.accounts,
+                                if moved.accounts == 1 { "" } else { "s" },
+                                calcite_core::transfer::human_bytes(moved.cloned_bytes)
+                            )
+                            .into(),
+                            is_error: false,
+                        });
+                    }
                     this.status = BackendStatus::Ready;
                     this.refresh_all(cx);
                     cx.notify();
@@ -326,6 +344,12 @@ impl AppState {
                     None => self.jobs.push(job.clone()),
                 }
                 if finished {
+                    if let Some((game_dir, mods_dir)) = self.pending_copies.remove(&job.id)
+                        && succeeded
+                        && let Some(instance_id) = job.instance_id.clone()
+                    {
+                        self.copy_game_folder(game_dir, mods_dir, instance_id, cx);
+                    }
                     self.schedule_refresh(cx);
                     if let Some(error) = job.error.clone().filter(|_| !succeeded) {
                         self.notice = Some(Notice {
@@ -555,6 +579,187 @@ impl AppState {
                         this.notify_error("Couldn't install the modpack", format!("{error:#}"))
                     }
                 }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Import one instance from Prism, MultiMC, ATLauncher, GDLauncher or
+    /// the CurseForge app, using the backend's importers.
+    pub fn import_from_launcher(
+        &mut self,
+        launcher: theseus::pack::import::ImportLauncherType,
+        base_path: PathBuf,
+        folder: String,
+        cx: &mut Context<Self>,
+    ) {
+        let import = Backend::global(cx).call(async move {
+            theseus::install::import_instance(launcher, base_path, folder).await
+        });
+        cx.spawn(async move |this, cx| {
+            let result = import.await;
+            let _ = this.update(cx, |this, cx| {
+                match result {
+                    Ok(snapshot) => this.handle_event(AppEvent::InstallJob(snapshot.into()), cx),
+                    Err(error) => {
+                        this.notify_error("Couldn't import that instance", format!("{error:#}"))
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Recreate an official-launcher installation as an instance, then bring
+    /// its worlds, packs and settings over.
+    pub fn import_installation(
+        &mut self,
+        installation: calcite_core::launchers::Installation,
+        cx: &mut Context<Self>,
+    ) {
+        use calcite_core::launchers::Loader;
+        let loader = match installation.version.loader {
+            Loader::Vanilla => ModLoader::Vanilla,
+            Loader::Fabric => ModLoader::Fabric,
+            Loader::Quilt => ModLoader::Quilt,
+            Loader::Forge => ModLoader::Forge,
+            Loader::NeoForge => ModLoader::NeoForge,
+        };
+        let name = installation.name.clone();
+        let game_dir = installation.game_dir.clone();
+        let mods_dir = installation.mods_dir.clone();
+        let wanted_game = installation.version.game_version.clone();
+        let wanted_loader = installation.version.loader_version.clone();
+        let create = Backend::global(cx).call(async move {
+            // Resolve "latest-release" and check the loader build still exists.
+            let game_version = if wanted_game.starts_with("latest-") {
+                let catalog = theseus::metadata::get_minecraft_versions().await?;
+                if wanted_game == "latest-snapshot" {
+                    catalog.latest.snapshot.as_str().to_string()
+                } else {
+                    catalog.latest.release.as_str().to_string()
+                }
+            } else {
+                wanted_game
+            };
+            let loader_version = match (crate::versions::manifest_name(loader), wanted_loader) {
+                (Some(meta), Some(wanted)) => {
+                    let manifest = theseus::metadata::get_loader_versions(meta).await?;
+                    let catalog = crate::versions::LoaderCatalog::from_manifest(&manifest);
+                    let known = catalog
+                        .loaders_for(&game_version)
+                        .iter()
+                        .any(|l| l.id == wanted);
+                    Some(if known { wanted } else { "stable".to_string() })
+                }
+                (Some(_), None) => Some("stable".to_string()),
+                (None, _) => None,
+            };
+            theseus::install::create_instance(
+                name,
+                game_version,
+                loader,
+                loader_version,
+                None,
+                None,
+                theseus::data::InstanceLink::Unmanaged,
+            )
+            .await
+        });
+        cx.spawn(async move |this, cx| {
+            let result = create.await;
+            let _ = this.update(cx, |this, cx| {
+                match result {
+                    Ok(snapshot) => {
+                        this.pending_copies
+                            .insert(snapshot.job_id.clone(), (game_dir, mods_dir));
+                        this.handle_event(AppEvent::InstallJob(snapshot.into()), cx);
+                    }
+                    Err(error) => {
+                        this.notify_error("Couldn't import that installation", format!("{error:#}"))
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Clone worlds, packs and settings from a game folder into an instance.
+    fn copy_game_folder(
+        &mut self,
+        game_dir: PathBuf,
+        mods_dir: Option<PathBuf>,
+        instance_id: String,
+        cx: &mut Context<Self>,
+    ) {
+        let copy = Backend::global(cx).run(async move {
+            let target = theseus::instance::get_full_path(&instance_id)
+                .await
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            tokio::task::spawn_blocking(move || -> anyhow::Result<u64> {
+                let cancel = std::sync::atomic::AtomicBool::new(false);
+                let mut files = 0;
+                // Lunar and Feather keep added mods outside the game folder.
+                if let Some(mods) = &mods_dir {
+                    let dst = target.join("mods");
+                    std::fs::create_dir_all(&dst)?;
+                    for entry in std::fs::read_dir(mods)?.flatten() {
+                        let to = dst.join(entry.file_name());
+                        if entry.path().extension().is_some_and(|x| x == "jar")
+                            && !to.exists()
+                            && reflink_copy::reflink_or_copy(entry.path(), &to).is_ok()
+                        {
+                            files += 1;
+                        }
+                    }
+                }
+                for item in calcite_core::launchers::CARRIED_OVER {
+                    // A client's own mods folder replaces the game folder's.
+                    if item == "mods" && mods_dir.is_some() {
+                        continue;
+                    }
+                    let src = game_dir.join(item);
+                    let dst = target.join(item);
+                    if src.is_dir() {
+                        std::fs::create_dir_all(&dst)?;
+                        for entry in std::fs::read_dir(&src)?.flatten() {
+                            let to = dst.join(entry.file_name());
+                            if to.exists() {
+                                continue;
+                            }
+                            if entry.path().is_dir() {
+                                files += calcite_core::clone::clone_tree(
+                                    &entry.path(),
+                                    &to,
+                                    &cancel,
+                                    |_| {},
+                                )?
+                                .files;
+                            } else if reflink_copy::reflink_or_copy(entry.path(), &to).is_ok() {
+                                files += 1;
+                            }
+                        }
+                    } else if src.is_file()
+                        && !dst.exists()
+                        && reflink_copy::reflink_or_copy(&src, &dst).is_ok()
+                    {
+                        files += 1;
+                    }
+                }
+                Ok(files)
+            })
+            .await?
+        });
+        cx.spawn(async move |this, cx| {
+            let result = copy.await.and_then(|r| r);
+            let _ = this.update(cx, |this, cx| {
+                if let Err(error) = result {
+                    this.notify_error("Couldn't bring your worlds over", format!("{error:#}"));
+                }
+                this.schedule_refresh(cx);
                 cx.notify();
             });
         })

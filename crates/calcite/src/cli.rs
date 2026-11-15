@@ -18,7 +18,10 @@ use crate::state::{loader_name, parse_legacy_line};
 /// Returns `Some(exit code)` if `args` was a command, `None` to open the app.
 pub fn run(args: &[String]) -> Option<i32> {
     let command = args.first()?.as_str();
-    if !matches!(command, "list" | "create" | "play" | "help" | "--help") {
+    if !matches!(
+        command,
+        "list" | "create" | "play" | "move-in" | "help" | "--help"
+    ) {
         return None;
     }
     if matches!(command, "help" | "--help") {
@@ -36,8 +39,48 @@ pub fn run(args: &[String]) -> Option<i32> {
     };
     let args = args.to_vec();
     let result: anyhow::Result<()> = futures::executor::block_on(async move {
-        backend.init_state().await?;
+        if let Some(moved) = backend.init_state().await? {
+            println!(
+                "Moved in {} instances from {}.",
+                moved.instances, moved.source
+            );
+        }
         match args[0].as_str() {
+            "move-in" => {
+                let dir = calcite_core::transfer::modrinth_app_dir()
+                    .ok_or_else(|| anyhow::anyhow!("Modrinth App isn't installed"))?;
+                let preview = backend
+                    .run(async move { calcite_core::transfer::preview_modrinth(&dir).await })
+                    .await??;
+                println!(
+                    "Modrinth App: {} instances, {} accounts, {}",
+                    preview.instances,
+                    preview.accounts,
+                    calcite_core::transfer::human_bytes(preview.size.bytes)
+                );
+                let calcite_dir =
+                    crate::backend::data_dir().ok_or_else(|| anyhow::anyhow!("no data folder"))?;
+                let schema: i64 = crate::backend::DB_SCHEMA.parse().unwrap_or(0);
+                let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let manifest = backend
+                    .run(async move {
+                        calcite_core::transfer::stage_modrinth(
+                            &preview,
+                            &calcite_dir,
+                            schema,
+                            cancel,
+                            |_| {},
+                        )
+                        .await
+                    })
+                    .await??;
+                println!(
+                    "Staged {} files ({} shared, not copied). Start Calcite to finish.",
+                    manifest.files,
+                    calcite_core::transfer::human_bytes(manifest.cloned_bytes)
+                );
+                Ok(())
+            }
             "list" => {
                 let instances = backend.call(theseus::instance::list()).await?;
                 if instances.is_empty() {

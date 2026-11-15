@@ -6,6 +6,7 @@ mod backend;
 mod cli;
 mod images;
 mod login;
+mod prefs;
 mod state;
 mod theme;
 mod ui;
@@ -17,7 +18,7 @@ use gpui_kit::{App, Bounds, WindowBounds, WindowOptions, px, size};
 
 use crate::backend::Backend;
 use crate::state::AppState;
-use crate::theme::{Accent, Appearance};
+use crate::theme::Appearance;
 use crate::ui::pages::discover::Api;
 use crate::ui::shell::{Route, Shell};
 
@@ -70,12 +71,23 @@ fn main() {
             if let Err(error) = assets::load_fonts(cx) {
                 tracing::warn!("bundled fonts failed to load: {error:#}");
             }
-            let appearance = match snapshot.as_ref().map(|s| s.2.as_str()) {
-                Some("light") => Appearance::Light,
-                Some("oled") => Appearance::Oled,
-                _ => Appearance::Dark,
-            };
-            theme::apply(appearance, Accent::Honey, cx);
+            let mut saved = prefs::Prefs::load();
+            match snapshot.as_ref().map(|s| s.2.as_str()) {
+                Some("light") => saved.appearance = Appearance::Light,
+                Some("oled") => saved.appearance = Appearance::Oled,
+                Some(_) => saved.appearance = Appearance::Dark,
+                None => {}
+            }
+            if snapshot
+                .as_ref()
+                .is_some_and(|s| s.0.starts_with("onboarding"))
+            {
+                saved.onboarding_done = false;
+            } else if snapshot.is_some() {
+                saved.onboarding_done = true;
+            }
+            theme::apply(saved.appearance, saved.accent, cx);
+            cx.set_global(saved);
 
             let api = calcite_core::modrinth::Client::new(&calcite_core::user_agent())
                 .expect("HTTP client");
@@ -103,6 +115,10 @@ fn main() {
                         "gallery" => Route::Gallery,
                         "library" => Route::Library,
                         "discover" => Route::Discover,
+                        "move-in" => Route::Settings(ui::pages::settings::Section::MoveIn),
+                        "settings" => Route::Settings(ui::pages::settings::Section::Appearance),
+                        "accounts" => Route::Settings(ui::pages::settings::Section::Accounts),
+                        "about" => Route::Settings(ui::pages::settings::Section::About),
                         _ => Route::Home,
                     };
                     let shell = cx.new(|cx| Shell::new(start, window, cx));
@@ -149,6 +165,7 @@ fn take_snapshot(window: gpui_kit::AnyWindowHandle, page: String, out: String, c
                         }
                     }
                     ("create", _) => shell.open_create_dialog(window, cx),
+                    ("onboarding-movein", _) => shell.set_onboarding_step(1, window, cx),
                     _ => {}
                 }
             });

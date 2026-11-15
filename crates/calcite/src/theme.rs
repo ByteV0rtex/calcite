@@ -12,7 +12,8 @@ use gpui_kit::{App, Global, Hsla, Pixels, Rgba, px, rgb, rgba};
 use serde_json::json;
 
 /// Light, dark, or true-black.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Appearance {
     Light,
     #[default]
@@ -28,7 +29,8 @@ impl Appearance {
 
 /// The curated accent set. Honey is Calcite's own; the rest are for people
 /// who want their launcher to feel like theirs.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Accent {
     #[default]
     Honey,

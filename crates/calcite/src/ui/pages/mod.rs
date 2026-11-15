@@ -3,6 +3,8 @@ pub mod gallery;
 pub mod home;
 pub mod instance;
 pub mod library;
+pub mod move_in;
+pub mod settings;
 
 use gpui_kit::prelude::*;
 use gpui_kit::{App, FontWeight, SharedString, div, px};

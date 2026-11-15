@@ -2,96 +2,20 @@
 //! Used for design review; becomes Settings › Appearance in milestone 5.
 
 use gpui_kit::prelude::*;
-use gpui_kit::{AnyElement, ClickEvent, Context, FontWeight, Hsla, SharedString, Window, div, px};
+use gpui_kit::{AnyElement, Context, FontWeight, Hsla, Window, div, px};
 
-use crate::theme::{Accent, Appearance, PaletteExt, radius, space, type_scale};
+use crate::theme::{PaletteExt, radius, space, type_scale};
 use crate::ui::components::{
     Button, ButtonSize, chip, empty_state, icon, icon_chip, panel, progress_bar, section_heading,
     skeleton, state_chip, thumb,
 };
-use crate::ui::shell::{Shell, set_look};
+use crate::ui::shell::Shell;
 
 pub fn render(_shell: &mut Shell, _window: &mut Window, cx: &mut Context<Shell>) -> AnyElement {
     let p = cx.palette().clone();
 
-    let appearance_picker = {
-        let mut row = div().flex().gap(space(2.0));
-        for (label, appearance) in [
-            ("Dark", Appearance::Dark),
-            ("Light", Appearance::Light),
-            ("OLED", Appearance::Oled),
-        ] {
-            let active = p.appearance == appearance;
-            let accent = p.accent_kind;
-            row =
-                row.child(
-                    div()
-                        .id(SharedString::from(format!("appearance-{label}")))
-                        .h(px(30.0))
-                        .px(space(3.0))
-                        .flex()
-                        .items_center()
-                        .rounded(px(radius::SM))
-                        .border_1()
-                        .border_color(if active { p.accent } else { p.border })
-                        .bg(if active { p.accent_soft } else { p.surface })
-                        .text_size(px(type_scale::BODY))
-                        .text_color(if active {
-                            p.accent_text
-                        } else {
-                            p.text_secondary
-                        })
-                        .cursor_pointer()
-                        .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
-                            set_look(appearance, accent, cx)
-                        }))
-                        .child(label),
-                );
-        }
-        row
-    };
-
-    let accent_picker = {
-        let mut row = div().flex().gap(space(2.0));
-        for accent in Accent::ALL {
-            let swatch = crate::theme::Palette::new(p.appearance, accent).accent;
-            let active = p.accent_kind == accent;
-            let appearance = p.appearance;
-            row =
-                row.child(
-                    div()
-                        .id(SharedString::from(format!("accent-{}", accent.name())))
-                        .flex()
-                        .flex_col()
-                        .items_center()
-                        .gap(space(1.5))
-                        .cursor_pointer()
-                        .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
-                            set_look(appearance, accent, cx)
-                        }))
-                        .child(
-                            div()
-                                .size(px(28.0))
-                                .rounded_full()
-                                .p(px(3.0))
-                                .border_2()
-                                .border_color(if active {
-                                    swatch
-                                } else {
-                                    Hsla::transparent_black()
-                                })
-                                .child(div().size_full().rounded_full().bg(swatch)),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(type_scale::CAPTION))
-                                .text_color(if active { p.text } else { p.text_muted })
-                                .child(accent.name()),
-                        ),
-                );
-        }
-        row
-    };
+    let appearance_picker = crate::ui::look::appearance_picker(cx);
+    let accent_picker = crate::ui::look::accent_picker(cx);
 
     let swatch = |name: &'static str, color: Hsla| {
         div()

@@ -1033,6 +1033,7 @@ dependencies = [
  "anyhow",
  "calcite-core",
  "chrono",
+ "dirs 7.0.0",
  "futures",
  "gpui-kit",
  "gpui-pre",
@@ -1040,6 +1041,7 @@ dependencies = [
  "image",
  "minecraft-meta-manifest",
  "parking_lot",
+ "reflink-copy",
  "reqwest",
  "rust-embed",
  "serde",
@@ -1059,13 +1061,19 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "chrono",
+ "dirs 7.0.0",
+ "fs4",
+ "reflink-copy",
  "reqwest",
  "serde",
  "serde_json",
+ "sqlx",
+ "tempfile",
  "thiserror 2.0.21",
  "tokio",
  "tracing",
  "url",
+ "walkdir",
 ]
 
 [[package]]
@@ -7511,6 +7519,18 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.9",
+]
+
+[[package]]
+name = "reflink-copy"
+version = "0.1.33"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "20d23b61573e4e96a48e3196327eedc4d50e30ba1ea1eae3f08187b44542e642"
+dependencies = [
+ "cfg-if",
+ "libc",
+ "rustix",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

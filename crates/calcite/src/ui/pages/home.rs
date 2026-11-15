@@ -26,7 +26,7 @@ pub fn render(shell: &mut Shell, _window: &mut Window, cx: &mut Context<Shell>) 
                 "house",
                 "Welcome to Calcite",
                 if accounts == 0 {
-                    "Sign in with your Microsoft account (bottom left), then install a modpack or make your own instance."
+                    "Bring your instances over from Modrinth App or another launcher, install a modpack, or make your own instance."
                 } else {
                     "Install a modpack from Discover or make your own instance to get started."
                 },
@@ -41,6 +41,14 @@ pub fn render(shell: &mut Shell, _window: &mut Window, cx: &mut Context<Shell>) 
                                 .primary()
                                 .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                                     this.navigate(Route::Discover, window, cx)
+                                })),
+                        )
+                        .child(
+                            Button::new("home-move-in")
+                                .icon("arrow-down-to-line")
+                                .label("Move in from another launcher")
+                                .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                                    this.open_settings(crate::ui::pages::settings::Section::MoveIn, window, cx)
                                 })),
                         )
                         .child(

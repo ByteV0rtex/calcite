@@ -13,6 +13,13 @@ tracing.workspace = true
 reqwest.workspace = true
 url.workspace = true
 chrono.workspace = true
+dirs.workspace = true
+reflink-copy = "0.1.33"
+fs4 = "1.1.0"
+walkdir = "2.5.0"
+tokio.workspace = true
+sqlx = { version = "0.9.0", default-features = false, features = ["sqlite", "runtime-tokio"] }
 
 [dev-dependencies]
-tokio.workspace = true
+tempfile = "3.27.0"
+tokio = { workspace = true, features = ["rt", "macros"] }

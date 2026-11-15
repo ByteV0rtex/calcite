@@ -9,12 +9,14 @@ use gpui_kit::{
 };
 
 use crate::state::{AppState, BackendStatus, InstanceInfo};
-use crate::theme::{self, Accent, Appearance, PaletteExt, radius, space, type_scale};
+use crate::theme::{self, PaletteExt, radius, space, type_scale};
 use crate::ui::components::{
     Button, empty_state, icon, progress_bar, short_duration, state_chip, thumb,
 };
 use crate::ui::create_instance::{CreateInstanceDialog, DialogEvent};
 use crate::ui::pages::instance::InstancePage;
+use crate::ui::pages::move_in::MoveInPage;
+use crate::ui::pages::settings::{self, Section as SettingsSection};
 use crate::ui::pages::{discover::DiscoverPage, gallery, home, library};
 
 /// Width of the left sidebar.
@@ -28,6 +30,7 @@ pub enum Route {
     Library,
     Discover,
     Instance(String),
+    Settings(SettingsSection),
     Gallery,
 }
 
@@ -63,10 +66,12 @@ pub struct Shell {
     state: Entity<AppState>,
     discover: Entity<DiscoverPage>,
     instance_page: Option<Entity<InstancePage>>,
+    move_in: Option<Entity<MoveInPage>>,
     dialog: Option<Entity<CreateInstanceDialog>>,
     pub library_filter: Entity<InputState>,
     pub library_sort: LibrarySort,
     account_menu_open: bool,
+    onboarding_step: Option<usize>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -91,10 +96,12 @@ impl Shell {
             state,
             discover,
             instance_page: None,
+            move_in: None,
             dialog: None,
             library_filter,
             library_sort: LibrarySort::LastPlayed,
             account_menu_open: false,
+            onboarding_step: (!cx.global::<crate::prefs::Prefs>().onboarding_done).then_some(0),
             _subscriptions: subscriptions,
         };
         shell.set_route(start, window, cx);
@@ -115,6 +122,9 @@ impl Shell {
                 let id = id.clone();
                 self.instance_page = Some(cx.new(|cx| InstancePage::new(id, window, cx)));
             }
+        }
+        if route == Route::Settings(SettingsSection::MoveIn) {
+            self.ensure_move_in(window, cx);
         }
         self.route = route;
         self.account_menu_open = false;
@@ -145,6 +155,49 @@ impl Shell {
             self.set_route(route, window, cx);
             self.back.push(current);
         }
+    }
+
+    fn ensure_move_in(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.move_in.is_none() {
+            self.move_in = Some(cx.new(|cx| MoveInPage::new(window, cx)));
+        }
+    }
+
+    pub fn open_settings(
+        &mut self,
+        section: SettingsSection,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.navigate(Route::Settings(section), window, cx);
+    }
+
+    pub fn set_onboarding_step(
+        &mut self,
+        step: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if step == 1 {
+            self.ensure_move_in(window, cx);
+        }
+        self.onboarding_step = Some(step.min(crate::ui::onboarding::STEPS.len() - 1));
+        cx.notify();
+    }
+
+    pub fn finish_onboarding(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        crate::prefs::Prefs::finish_onboarding(cx);
+        self.onboarding_step = None;
+        let has_instances = !self.state.read(cx).instances.is_empty();
+        self.set_route(
+            if has_instances {
+                Route::Library
+            } else {
+                Route::Home
+            },
+            window,
+            cx,
+        );
     }
 
     pub fn open_create_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -771,15 +824,32 @@ impl Shell {
                     .cursor_pointer()
                     .hover(|s| s.bg(p.hover))
                     .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                        this.navigate(Route::Gallery, window, cx)
+                        this.open_settings(SettingsSection::Appearance, window, cx)
                     }))
-                    .child(icon("settings", 16.0, p.text_muted)),
+                    .child(icon(
+                        "settings",
+                        16.0,
+                        if matches!(self.route, Route::Settings(_)) {
+                            p.accent
+                        } else {
+                            p.text_muted
+                        },
+                    )),
             )
     }
 
     fn page(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        if let Some(step) = self.onboarding_step {
+            let move_in = self.move_in.clone();
+            return crate::ui::onboarding::render(self, step, move_in, cx);
+        }
         match self.state.read(cx).status.clone() {
-            BackendStatus::Starting if !matches!(self.route, Route::Discover | Route::Gallery) => {
+            BackendStatus::Starting
+                if !matches!(
+                    self.route,
+                    Route::Discover | Route::Gallery | Route::Settings(_)
+                ) =>
+            {
                 return div()
                     .size_full()
                     .flex()
@@ -811,6 +881,10 @@ impl Shell {
                 Some(page) => page.clone().into_any_element(),
                 None => div().into_any_element(),
             },
+            Route::Settings(section) => {
+                let move_in = self.move_in.clone();
+                settings::render(self, section, move_in, window, cx)
+            }
             Route::Gallery => gallery::render(self, window, cx),
         }
     }
@@ -898,7 +972,9 @@ impl Render for Shell {
                     .flex()
                     .flex_1()
                     .min_h_0()
-                    .child(self.sidebar(cx))
+                    .when(self.onboarding_step.is_none(), |d| {
+                        d.child(self.sidebar(cx))
+                    })
                     .child(
                         div()
                             .flex_1()
@@ -932,11 +1008,6 @@ pub fn instance_icon(inst: &InstanceInfo) -> Option<ImageSource> {
         .as_ref()
         .filter(|p| p.exists())
         .map(|p| ImageSource::from(p.clone()))
-}
-
-/// Toggle helpers used by the design-system page.
-pub fn set_look(appearance: Appearance, accent: Accent, cx: &mut App) {
-    theme::apply(appearance, accent, cx);
 }
 
 pub fn running_chip(secs: u64, cx: &App) -> gpui_kit::Div {

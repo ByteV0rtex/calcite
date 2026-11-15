@@ -29,6 +29,14 @@ pub fn data_id() -> String {
     }
 }
 
+/// Calcite's data folder (where the backend keeps its database).
+pub fn data_dir() -> Option<std::path::PathBuf> {
+    theseus::data::DirectoryInfo::initial_settings_dir_path(&data_id())
+}
+
+/// Newest database migration the bundled backend understands.
+pub const DB_SCHEMA: &str = env!("CALCITE_DB_SCHEMA");
+
 #[derive(Clone)]
 pub struct Backend {
     runtime: Arc<tokio::runtime::Runtime>,
@@ -89,12 +97,25 @@ impl Backend {
     }
 
     /// Initialize the backend state (database, settings, file watchers).
-    pub fn init_state(&self) -> impl Future<Output = anyhow::Result<()>> + use<> {
+    /// A transfer staged by the Move-in flow is applied first, before the
+    /// database is opened; its summary is returned.
+    pub fn init_state(
+        &self,
+    ) -> impl Future<Output = anyhow::Result<Option<calcite_core::transfer::Manifest>>> + use<>
+    {
         let id = data_id();
-        self.call(async move {
-            theseus::EventState::init().await?;
-            theseus::State::init(id).await
-        })
+        let task = self.run(async move {
+            let applied = match data_dir() {
+                Some(dir) => calcite_core::transfer::apply_staged(&dir)?,
+                None => None,
+            };
+            theseus::EventState::init()
+                .await
+                .map_err(|e| anyhow!("{e}"))?;
+            theseus::State::init(id).await.map_err(|e| anyhow!("{e}"))?;
+            Ok(applied)
+        });
+        async move { task.await? }
     }
 
     pub fn global(cx: &App) -> &Backend {

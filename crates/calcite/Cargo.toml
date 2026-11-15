@@ -32,6 +32,8 @@ rust-embed.workspace = true
 smallvec.workspace = true
 url.workspace = true
 uuid.workspace = true
+reflink-copy = "0.1.33"
+dirs.workspace = true
 chrono.workspace = true
 calcite-core = { path = "../calcite-core" }
 minecraft-meta-manifest = { path = "../../vendor/modrinth/packages/minecraft-meta-manifest" }

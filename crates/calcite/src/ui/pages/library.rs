@@ -103,6 +103,14 @@ pub fn render(shell: &mut Shell, window: &mut Window, cx: &mut Context<Shell>) -
         )
         .child(div().flex_1())
         .child(
+            Button::new("move-in")
+                .icon("arrow-down-to-line")
+                .label("Move in")
+                .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                    this.open_settings(crate::ui::pages::settings::Section::MoveIn, window, cx)
+                })),
+        )
+        .child(
             Button::new("new-instance")
                 .icon("plus")
                 .label("New instance")
@@ -128,6 +136,14 @@ pub fn render(shell: &mut Shell, window: &mut Window, cx: &mut Context<Shell>) -
                             .primary()
                             .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                                 this.open_create_dialog(window, cx)
+                            })),
+                    )
+                    .child(
+                        Button::new("empty-move-in")
+                            .icon("arrow-down-to-line")
+                            .label("Move in from another launcher")
+                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                                this.open_settings(crate::ui::pages::settings::Section::MoveIn, window, cx)
                             })),
                     )
                     .child(
