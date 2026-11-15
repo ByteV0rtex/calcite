@@ -40,6 +40,7 @@ pub struct Extra {
     pub shots: Option<Result<Vec<Shot>, String>>,
     pub snapshots: Option<Vec<Snapshot>>,
     pub busy: Option<SharedString>,
+    pub health: Option<Result<crate::ui::pages::health_tab::HealthReport, String>>,
 }
 
 pub fn snapshots_dir(instance_id: &str) -> Option<PathBuf> {

@@ -1,6 +1,7 @@
 pub mod discover;
 pub mod gallery;
 pub mod game_settings;
+pub mod health_tab;
 pub mod home;
 pub mod instance;
 pub mod instance_tabs;

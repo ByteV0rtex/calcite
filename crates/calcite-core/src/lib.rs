@@ -3,6 +3,8 @@
 
 pub mod backups;
 pub mod clone;
+pub mod crash;
+pub mod health;
 pub mod launchers;
 pub mod markup;
 pub mod modrinth;

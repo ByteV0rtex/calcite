@@ -21,6 +21,7 @@ use crate::ui::shell::{instance_icon, running_chip};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tab {
     Content,
+    Health,
     Worlds,
     Screenshots,
     Snapshots,
@@ -175,6 +176,7 @@ impl InstancePage {
         page.load_content(cx);
         page.load_log_buffer(cx);
         page.check_updates(cx);
+        page.load_health(cx);
         page
     }
 
@@ -258,6 +260,10 @@ impl InstancePage {
         .detach();
     }
 
+    pub(crate) fn state(&self) -> &Entity<AppState> {
+        &self.state
+    }
+
     fn is_modpack(&self, cx: &App) -> bool {
         self.state
             .read(cx)
@@ -273,6 +279,7 @@ impl InstancePage {
         self.tab = tab;
         match tab {
             Tab::Worlds => self.load_worlds(cx),
+            Tab::Health => self.load_health(cx),
             Tab::Screenshots => self.load_shots(cx),
             Tab::Snapshots => self.load_snapshots(cx),
             _ => {}
@@ -630,6 +637,17 @@ impl InstancePage {
                 Tab::Content,
                 "Content",
                 count.filter(|c| *c > 0).map(|c| c.to_string()),
+            ),
+            (
+                Tab::Health,
+                "Health",
+                self.extra
+                    .health
+                    .as_ref()
+                    .and_then(|h| h.as_ref().ok())
+                    .map(|h| h.issues.len())
+                    .filter(|n| *n > 0)
+                    .map(|n| n.to_string()),
             ),
             (Tab::Worlds, "Worlds", None),
             (Tab::Screenshots, "Screenshots", None),
@@ -1174,6 +1192,7 @@ impl Render for InstancePage {
         let body = match self.tab {
             Tab::Content => self.content_tab(cx),
             Tab::Worlds => self.worlds_tab(cx),
+            Tab::Health => self.health_tab(cx),
             Tab::Screenshots => self.shots_tab(cx),
             Tab::Snapshots => self.snapshots_tab(cx),
             Tab::Logs => self.logs_tab(cx),

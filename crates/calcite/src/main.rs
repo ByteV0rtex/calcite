@@ -159,7 +159,7 @@ fn take_snapshot(window: gpui_kit::AnyWindowHandle, page: String, out: String, c
                 match (page.as_str(), first) {
                     (
                         "instance" | "instance-logs" | "instance-worlds" | "instance-shots"
-                        | "instance-snapshots" | "instance-settings",
+                        | "instance-snapshots" | "instance-settings" | "instance-health",
                         Some(id),
                     ) => {
                         use ui::pages::instance::Tab;
@@ -171,6 +171,7 @@ fn take_snapshot(window: gpui_kit::AnyWindowHandle, page: String, out: String, c
                             "instance-worlds" => Some(Tab::Worlds),
                             "instance-shots" => Some(Tab::Screenshots),
                             "instance-snapshots" => Some(Tab::Snapshots),
+                            "instance-health" => Some(Tab::Health),
                             _ => None,
                         };
                         if let Some(tab) = tab {

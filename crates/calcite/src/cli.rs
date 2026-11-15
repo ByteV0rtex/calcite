@@ -20,7 +20,16 @@ pub fn run(args: &[String]) -> Option<i32> {
     let command = args.first()?.as_str();
     if !matches!(
         command,
-        "list" | "create" | "play" | "add" | "content" | "move-in" | "help" | "--help"
+        "list"
+            | "create"
+            | "play"
+            | "add"
+            | "content"
+            | "health"
+            | "doctor"
+            | "move-in"
+            | "help"
+            | "--help"
     ) {
         return None;
     }
@@ -46,6 +55,93 @@ pub fn run(args: &[String]) -> Option<i32> {
             );
         }
         match args[0].as_str() {
+            "doctor" => {
+                // calcite doctor <crash report file>, or `all` for every instance
+                let target = args.get(1).cloned().unwrap_or_default();
+                let mut files: Vec<std::path::PathBuf> = Vec::new();
+                if target == "all" {
+                    for meta in backend.call(theseus::instance::list()).await? {
+                        let id = meta.instance.id.clone();
+                        if let Ok(dir) = backend
+                            .call(async move { theseus::instance::get_full_path(&id).await })
+                            .await
+                        {
+                            files.extend(
+                                std::fs::read_dir(dir.join("crash-reports"))
+                                    .into_iter()
+                                    .flatten()
+                                    .flatten()
+                                    .map(|e| e.path())
+                                    .filter(|p| p.extension().is_some_and(|x| x == "txt")),
+                            );
+                        }
+                    }
+                } else {
+                    files.push(target.into());
+                }
+                let mut tally: std::collections::BTreeMap<String, usize> = Default::default();
+                for file in &files {
+                    let text = std::fs::read_to_string(file).unwrap_or_default();
+                    let d = calcite_core::crash::analyze(&text);
+                    *tally.entry(d.title.clone()).or_default() += 1;
+                    if files.len() == 1 {
+                        println!(
+                            "{}\n{}\nsuspects: {:?}\n{}",
+                            d.title, d.advice, d.suspects, d.raw
+                        );
+                    }
+                }
+                if files.len() > 1 {
+                    let mut rows: Vec<_> = tally.into_iter().collect();
+                    rows.sort_by_key(|r| std::cmp::Reverse(r.1));
+                    for (title, n) in rows {
+                        println!("{n:>4}  {title}");
+                    }
+                }
+                Ok(())
+            }
+            "health" => {
+                let target = args.get(1).cloned().unwrap_or_default();
+                let instances = backend.call(theseus::instance::list()).await?;
+                let selected: Vec<_> = instances
+                    .into_iter()
+                    .filter(|m| {
+                        target == "all"
+                            || m.instance.id == target
+                            || m.instance.name.eq_ignore_ascii_case(&target)
+                    })
+                    .collect();
+                if selected.is_empty() {
+                    anyhow::bail!("no instance named '{target}' (or use `all`)");
+                }
+                for meta in selected {
+                    let loader = match meta.applied_content_set.loader {
+                        ModLoader::Fabric => calcite_core::health::LoaderKind::Fabric,
+                        ModLoader::Quilt => calcite_core::health::LoaderKind::Quilt,
+                        ModLoader::Forge => calcite_core::health::LoaderKind::Forge,
+                        ModLoader::NeoForge => calcite_core::health::LoaderKind::NeoForge,
+                        ModLoader::Vanilla => continue,
+                    };
+                    let id = meta.instance.id.clone();
+                    let dir = backend
+                        .call(async move { theseus::instance::get_full_path(&id).await })
+                        .await?;
+                    let started = std::time::Instant::now();
+                    let mods = calcite_core::health::read_mods_folder(&dir.join("mods"));
+                    let issues = calcite_core::health::check(&mods, loader);
+                    println!(
+                        "{} ({} mods, {:?}): {} issue(s)",
+                        meta.instance.name,
+                        mods.len(),
+                        started.elapsed(),
+                        issues.len()
+                    );
+                    for issue in issues {
+                        println!("  - {}", issue.title());
+                    }
+                }
+                Ok(())
+            }
             "content" => {
                 let target = args.get(1).cloned().unwrap_or_default();
                 let instances = backend.call(theseus::instance::list()).await?;

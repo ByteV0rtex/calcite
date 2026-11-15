@@ -1071,9 +1071,11 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
+ "toml 0.8.23",
  "tracing",
  "url",
  "walkdir",
+ "zip",
 ]
 
 [[package]]

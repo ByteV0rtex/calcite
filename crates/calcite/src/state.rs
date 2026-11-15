@@ -365,6 +365,9 @@ impl AppState {
                 }
                 ProcessPayloadType::Finished => {
                     let started = self.running.remove(&payload.instance_id).map(|r| r.started);
+                    if let Some(started) = started {
+                        self.explain_crash(payload.instance_id.clone(), started, cx);
+                    }
                     if cx.global::<crate::prefs::Prefs>().backup_worlds_on_exit
                         && let Some(started) = started
                     {
@@ -862,6 +865,50 @@ impl AppState {
                 }
                 cx.notify();
             });
+        })
+        .detach();
+    }
+
+    /// If the game left a crash report this session, say what went wrong.
+    fn explain_crash(&mut self, instance_id: String, since: DateTime<Utc>, cx: &mut Context<Self>) {
+        let name = self
+            .instance(&instance_id)
+            .map(|i| i.name.to_string())
+            .unwrap_or_default();
+        let task = Backend::global(cx).run(async move {
+            let dir = theseus::instance::get_full_path(&instance_id).await.ok()?;
+            tokio::task::spawn_blocking(move || {
+                let (time, path) = std::fs::read_dir(dir.join("crash-reports"))
+                    .ok()?
+                    .flatten()
+                    .filter_map(|e| Some((e.metadata().ok()?.modified().ok()?, e.path())))
+                    .max_by_key(|(t, _)| *t)?;
+                (DateTime::<Utc>::from(time) >= since - chrono::Duration::seconds(5))
+                    .then(|| std::fs::read_to_string(path).ok())
+                    .flatten()
+                    .map(|text| calcite_core::crash::analyze(&text))
+            })
+            .await
+            .ok()
+            .flatten()
+        });
+        cx.spawn(async move |this, cx| {
+            if let Ok(Some(d)) = task.await {
+                let _ = this.update(cx, |this, cx| {
+                    let harmless = d.cause == calcite_core::crash::Cause::HungWhileClosing;
+                    this.notice = Some(Notice {
+                        title: if harmless {
+                            d.title.clone().into()
+                        } else {
+                            format!("{name} crashed: {}", d.title).into()
+                        },
+                        body: format!("{} Open the instance's Health tab for details.", d.advice)
+                            .into(),
+                        is_error: !harmless,
+                    });
+                    cx.notify();
+                });
+            }
         })
         .detach();
     }
