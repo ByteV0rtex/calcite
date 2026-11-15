@@ -113,6 +113,14 @@ impl Backend {
                 .await
                 .map_err(|e| anyhow!("{e}"))?;
             theseus::State::init(id).await.map_err(|e| anyhow!("{e}"))?;
+            // Calcite's promise: no telemetry, no ad personalisation.
+            if let Ok(mut settings) = theseus::settings::get().await
+                && (settings.telemetry || settings.personalized_ads)
+            {
+                settings.telemetry = false;
+                settings.personalized_ads = false;
+                let _ = theseus::settings::set(settings).await;
+            }
             Ok(applied)
         });
         async move { task.await? }

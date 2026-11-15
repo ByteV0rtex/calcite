@@ -364,7 +364,12 @@ impl AppState {
                     );
                 }
                 ProcessPayloadType::Finished => {
-                    self.running.remove(&payload.instance_id);
+                    let started = self.running.remove(&payload.instance_id).map(|r| r.started);
+                    if cx.global::<crate::prefs::Prefs>().backup_worlds_on_exit
+                        && let Some(started) = started
+                    {
+                        self.backup_played_worlds(payload.instance_id.clone(), started, cx);
+                    }
                     // Playtime and "last played" changed.
                     self.schedule_refresh(cx);
                 }
@@ -511,6 +516,24 @@ impl AppState {
 
     /// Launch an instance. If nobody is signed in yet, say so instead.
     pub fn play(&mut self, instance_id: &str, cx: &mut Context<Self>) {
+        self.launch(instance_id, theseus::instance::QuickPlayType::None, cx)
+    }
+
+    /// Launch straight into a singleplayer world (Quick Play).
+    pub fn play_world(&mut self, instance_id: &str, world_folder: String, cx: &mut Context<Self>) {
+        self.launch(
+            instance_id,
+            theseus::instance::QuickPlayType::Singleplayer(world_folder),
+            cx,
+        )
+    }
+
+    fn launch(
+        &mut self,
+        instance_id: &str,
+        quick_play: theseus::instance::QuickPlayType,
+        cx: &mut Context<Self>,
+    ) {
         if self.accounts.is_empty() {
             self.notice = Some(Notice {
                 title: "Sign in to play".into(),
@@ -521,9 +544,8 @@ impl AppState {
             return;
         }
         let id = instance_id.to_string();
-        let run = Backend::global(cx).call(async move {
-            theseus::instance::run(&id, theseus::instance::QuickPlayType::None).await
-        });
+        let run =
+            Backend::global(cx).call(async move { theseus::instance::run(&id, quick_play).await });
         cx.spawn(async move |this, cx| {
             if let Err(error) = run.await {
                 let _ = this.update(cx, |this, cx| {
@@ -840,6 +862,64 @@ impl AppState {
                 }
                 cx.notify();
             });
+        })
+        .detach();
+    }
+
+    /// Back up every singleplayer world played since `since`, keeping the
+    /// newest five backups of each.
+    fn backup_played_worlds(
+        &mut self,
+        instance_id: String,
+        since: DateTime<Utc>,
+        cx: &mut Context<Self>,
+    ) {
+        let task = Backend::global(cx).run(async move {
+            let dir = theseus::instance::get_full_path(&instance_id).await.ok()?;
+            let worlds = theseus::worlds::get_instance_worlds(&instance_id)
+                .await
+                .ok()?;
+            let mut names = Vec::new();
+            for world in worlds {
+                let value = serde_json::to_value(&world).unwrap_or_default();
+                let Some(folder) = value
+                    .get("path")
+                    .and_then(|p| p.as_str())
+                    .map(str::to_string)
+                else {
+                    continue; // servers
+                };
+                // Allow a minute of clock slack between the game and Calcite.
+                if world
+                    .last_played
+                    .is_none_or(|t| t < since - chrono::Duration::minutes(1))
+                {
+                    continue;
+                }
+                if theseus::worlds::backup_world(&dir, &folder).await.is_ok() {
+                    calcite_core::backups::prune_world_backups(&dir.join("backups"), &folder, 5);
+                    names.push(world.name.clone());
+                }
+            }
+            Some(names)
+        });
+        cx.spawn(async move |this, cx| {
+            if let Ok(Some(names)) = task.await
+                && !names.is_empty()
+            {
+                let _ = this.update(cx, |this, cx| {
+                    this.notice = Some(Notice {
+                        title: if names.len() == 1 {
+                            format!("Backed up {}", names[0]).into()
+                        } else {
+                            format!("Backed up {} worlds", names.len()).into()
+                        },
+                        body: "Saved in the instance's backups folder. Calcite keeps the last five of each world.".into(),
+                        is_error: false,
+                    });
+                    cx.notify();
+                });
+            }
         })
         .detach();
     }

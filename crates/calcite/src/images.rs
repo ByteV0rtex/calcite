@@ -44,6 +44,11 @@ impl Images {
         });
     }
 
+    /// A local image file, decoded and shrunk like remote ones.
+    pub fn get_file(path: &std::path::Path, max_px: u32, cx: &mut App) -> Option<ImageSource> {
+        Self::get(&path.to_string_lossy(), max_px, cx)
+    }
+
     /// Returns the image if it's ready; otherwise starts loading it and
     /// returns `None` so the caller can show a placeholder. `max_px` is the
     /// largest edge, in device pixels, the image will be drawn at.
@@ -65,7 +70,12 @@ impl Images {
         let url = url.to_string();
         let backend = Backend::global(cx).clone();
         let fetch = backend.run(async move {
-            let bytes = client.bytes(&url).await?;
+            // Local files (screenshots, world icons) are read from disk.
+            let bytes = if url.starts_with('/') || url.contains(":\\") {
+                tokio::fs::read(&url).await?
+            } else {
+                client.bytes(&url).await?
+            };
             decode(&bytes, max_px)
         });
         cx.spawn(async move |cx| {

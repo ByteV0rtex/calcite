@@ -21,6 +21,9 @@ use crate::ui::shell::{instance_icon, running_chip};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tab {
     Content,
+    Worlds,
+    Screenshots,
+    Snapshots,
     Logs,
 }
 
@@ -67,6 +70,8 @@ struct Row {
     update_version: Option<String>,
     project_id: Option<String>,
     kind: ProjectType,
+    /// Part of the instance's modpack rather than added by the player.
+    from_pack: bool,
 }
 
 impl Row {
@@ -92,6 +97,7 @@ impl Row {
             update_version: item.update_version_id.clone(),
             project_id: item.project.as_ref().map(|p| p.id.clone()),
             kind: item.project_type,
+            from_pack: false,
             path: item.file_path,
             file_name: file_name.into(),
         }
@@ -102,6 +108,7 @@ pub enum InstancePageEvent {
     /// Open Discover filtered to this instance.
     AddContent(String),
     OpenProject(String),
+    OpenSettings(String),
 }
 
 impl gpui_kit::EventEmitter<InstancePageEvent> for InstancePage {}
@@ -116,6 +123,10 @@ pub struct InstancePage {
     log_scroll: UniformListScrollHandle,
     follow_logs: bool,
     state: Entity<AppState>,
+    pub(crate) extra: crate::ui::pages::instance_tabs::Extra,
+    /// The modpack's own files (modpack instances only).
+    pack_rows: Vec<Row>,
+    pack_loading: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -156,6 +167,9 @@ impl InstancePage {
             log_scroll: UniformListScrollHandle::new(),
             follow_logs: true,
             state,
+            extra: Default::default(),
+            pack_rows: Vec::new(),
+            pack_loading: false,
             _subscriptions: subscriptions,
         };
         page.load_content(cx);
@@ -208,8 +222,26 @@ impl InstancePage {
         cx.notify();
         let id = self.id.clone();
         let state = self.state.clone();
-        let call = Backend::global(cx)
-            .call(async move { theseus::install::bulk_update_content(id, updates).await });
+        let snapshots = crate::ui::pages::instance_tabs::snapshots_dir(&id);
+        let count = updates.len();
+        let call = Backend::global(cx).call(async move {
+            // Save what's there first so the update can be rolled back.
+            if let Some(snaps) = snapshots
+                && let Ok(dir) = theseus::instance::get_full_path(&id).await
+            {
+                let label = format!(
+                    "Before updating {count} mod{}",
+                    if count == 1 { "" } else { "s" }
+                );
+                let _ = tokio::task::spawn_blocking(move || {
+                    let result = calcite_core::snapshots::take(&dir, &snaps, &label, true);
+                    calcite_core::snapshots::prune_automatic(&snaps, 10);
+                    result
+                })
+                .await;
+            }
+            theseus::install::bulk_update_content(id, updates).await
+        });
         cx.spawn(async move |this, cx| {
             let result = call.await;
             state.update(cx, |state, cx| {
@@ -226,33 +258,85 @@ impl InstancePage {
         .detach();
     }
 
+    fn is_modpack(&self, cx: &App) -> bool {
+        self.state
+            .read(cx)
+            .instance(&self.id)
+            .is_some_and(|i| i.is_modpack)
+    }
+
     pub fn id(&self) -> &str {
         &self.id
     }
 
     pub fn set_tab(&mut self, tab: Tab, cx: &mut Context<Self>) {
         self.tab = tab;
+        match tab {
+            Tab::Worlds => self.load_worlds(cx),
+            Tab::Screenshots => self.load_shots(cx),
+            Tab::Snapshots => self.load_snapshots(cx),
+            _ => {}
+        }
         cx.notify();
     }
 
-    fn load_content(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn load_content(&mut self, cx: &mut Context<Self>) {
         let id = self.id.clone();
         let fetch = Backend::global(cx).call(async move {
             // Pick up files added outside Calcite (dropped into the mods folder).
             if let Err(error) = theseus::instance::sync_content_files(&id).await {
                 tracing::warn!("content sync for {id} failed: {error}");
             }
-            theseus::instance::get_content_items(&id, None).await
+            let added = theseus::instance::get_content_items(&id, None).await?;
+            Ok((added, Vec::new()))
         });
+        // Phase 2: a modpack's own files. The first lookup per pack asks
+        // Modrinth about every file, so it arrives separately.
+        if self.is_modpack(cx) {
+            self.pack_loading = true;
+            let id = self.id.clone();
+            let pack = Backend::global(cx).call(async move {
+                theseus::instance::get_linked_modpack_content(&id, None).await
+            });
+            cx.spawn(async move |this, cx| {
+                let result = pack.await;
+                let _ = this.update(cx, |this, cx| {
+                    this.pack_loading = false;
+                    if let Ok(items) = result {
+                        let mut pack_rows: Vec<Row> = items
+                            .into_iter()
+                            .map(|item| Row {
+                                from_pack: true,
+                                ..Row::from_item(item)
+                            })
+                            .collect();
+                        pack_rows.sort_by_key(|r| r.title.to_lowercase());
+                        this.pack_rows = pack_rows;
+                    }
+                    cx.notify();
+                });
+            })
+            .detach();
+        }
         cx.spawn(async move |this, cx| {
             let result = fetch.await;
             let _ = this.update(cx, |this, cx| {
                 this.content = Some(
                     result
-                        .map(|items| {
+                        .map(|(added, from_pack)| {
                             let mut rows: Vec<Row> =
-                                items.into_iter().map(Row::from_item).collect();
+                                added.into_iter().map(Row::from_item).collect();
+                            let mut pack_rows: Vec<Row> = from_pack
+                                .into_iter()
+                                .map(|item| Row {
+                                    from_pack: true,
+                                    ..Row::from_item(item)
+                                })
+                                .filter(|p| !rows.iter().any(|r| r.path == p.path))
+                                .collect();
                             rows.sort_by_key(|r| r.title.to_lowercase());
+                            pack_rows.sort_by_key(|r| r.title.to_lowercase());
+                            rows.extend(pack_rows);
                             rows
                         })
                         .map_err(|e| format!("{e:#}")),
@@ -480,6 +564,14 @@ impl InstancePage {
                             .items_center()
                             .gap(space(2.0))
                             .child(
+                                Button::new("instance-settings")
+                                    .icon("settings")
+                                    .ghost()
+                                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                        cx.emit(InstancePageEvent::OpenSettings(this.id.clone()))
+                                    })),
+                            )
+                            .child(
                                 Button::new("instance-folder")
                                     .icon("folder-open")
                                     .ghost()
@@ -524,7 +616,7 @@ impl InstancePage {
             .content
             .as_ref()
             .and_then(|c| c.as_ref().ok())
-            .map(Vec::len);
+            .map(|added| added.len() + self.pack_rows.len());
         let mut row = div()
             .flex()
             .items_end()
@@ -539,6 +631,9 @@ impl InstancePage {
                 "Content",
                 count.filter(|c| *c > 0).map(|c| c.to_string()),
             ),
+            (Tab::Worlds, "Worlds", None),
+            (Tab::Screenshots, "Screenshots", None),
+            (Tab::Snapshots, "Snapshots", None),
             (Tab::Logs, "Logs", None),
         ] {
             let active = tab == self.tab;
@@ -609,7 +704,17 @@ impl InstancePage {
                 )
                 .into_any_element();
             }
-            Some(Ok(rows)) => rows.clone(),
+            Some(Ok(rows)) => {
+                let mut rows = rows.clone();
+                rows.extend(
+                    self.pack_rows
+                        .iter()
+                        .filter(|p| !rows.iter().any(|r| r.path == p.path))
+                        .cloned()
+                        .collect::<Vec<_>>(),
+                );
+                rows
+            }
         };
 
         let counts = |f: Filter| rows.iter().filter(|r| f.matches(r.kind)).count();
@@ -696,7 +801,7 @@ impl InstancePage {
             .into_iter()
             .filter(|r| self.filter.matches(r.kind))
             .collect();
-        if visible.is_empty() {
+        if visible.is_empty() && !self.pack_loading {
             return div()
                 .size_full()
                 .flex()
@@ -721,7 +826,26 @@ impl InstancePage {
             .overflow_y_scroll()
             .px(space(8.0))
             .pb(space(8.0));
+        let has_pack = visible.iter().any(|r| r.from_pack);
+        let has_added = visible.iter().any(|r| !r.from_pack);
+        let heading = |text: String| {
+            div()
+                .pt(space(4.0))
+                .pb(space(1.5))
+                .px(space(3.0))
+                .text_size(px(type_scale::SMALL))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(p.text_muted)
+                .child(text)
+        };
         for (ix, row) in visible.iter().enumerate() {
+            if has_pack && has_added && ix == 0 {
+                list = list.child(heading("Added by you".into()));
+            }
+            if has_pack && row.from_pack && (ix == 0 || !visible[ix - 1].from_pack) {
+                let count = visible.iter().filter(|r| r.from_pack).count();
+                list = list.child(heading(format!("From the modpack · {count}")));
+            }
             let source = row
                 .icon_url
                 .as_deref()
@@ -838,16 +962,38 @@ impl InstancePage {
                                     .child(row.version.clone()),
                             ),
                     )
-                    .child(
+                    // Pack files come back with the next modpack update, so
+                    // they can be turned off but not removed.
+                    .child(if row.from_pack {
+                        div().w(px(28.0)).into_any_element()
+                    } else {
                         Button::new(SharedString::from(format!("remove-{ix}")))
                             .icon("trash")
                             .ghost()
                             .small()
                             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                                 this.remove(remove_path.clone(), cx)
-                            })),
-                    ),
+                            }))
+                            .into_any_element()
+                    }),
             );
+        }
+
+        if self.pack_loading && !visible.iter().any(|r| r.from_pack) {
+            list = list.child(heading("From the modpack · loading…".into()));
+            for _ in 0..3 {
+                list = list.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(space(3.0))
+                        .h(px(52.0))
+                        .px(space(3.0))
+                        .child(skeleton(px(28.0), px(16.0), cx))
+                        .child(skeleton(px(32.0), px(32.0), cx))
+                        .child(skeleton(px(220.0), px(14.0), cx)),
+                );
+            }
         }
 
         div()
@@ -1027,6 +1173,9 @@ impl Render for InstancePage {
         }
         let body = match self.tab {
             Tab::Content => self.content_tab(cx),
+            Tab::Worlds => self.worlds_tab(cx),
+            Tab::Screenshots => self.shots_tab(cx),
+            Tab::Snapshots => self.snapshots_tab(cx),
             Tab::Logs => self.logs_tab(cx),
         };
         div()

@@ -1,10 +1,12 @@
 //! Calcite's UI-independent logic. Everything here is testable without a
 //! window and is shared by the app and the command line.
 
+pub mod backups;
 pub mod clone;
 pub mod launchers;
 pub mod markup;
 pub mod modrinth;
+pub mod snapshots;
 pub mod transfer;
 
 /// Calcite's version, as reported to services and shown in the app.

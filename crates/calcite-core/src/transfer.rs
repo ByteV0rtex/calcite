@@ -447,8 +447,12 @@ mod tests {
             "CREATE TABLE minecraft_users (uuid TEXT)".into(),
             "INSERT INTO minecraft_users VALUES ('u1')".into(),
             "CREATE TABLE cache (data JSONB)".into(),
+            // Build the JSON properly: Windows paths contain backslashes.
             format!(
-                "INSERT INTO cache VALUES (jsonb('{{\"icon_path\":\"{root_s}/caches/icons/a.png\"}}'))"
+                "INSERT INTO cache VALUES (jsonb('{}'))",
+                serde_json::json!({ "icon_path": format!("{root_s}/caches/icons/a.png") })
+                    .to_string()
+                    .replace('\'', "''")
             ),
             "CREATE TABLE processes (pid INTEGER)".into(),
             "INSERT INTO processes VALUES (42)".into(),

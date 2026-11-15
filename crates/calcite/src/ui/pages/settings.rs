@@ -16,14 +16,16 @@ use crate::ui::shell::Shell;
 pub enum Section {
     #[default]
     Appearance,
+    Game,
     MoveIn,
     Accounts,
     About,
 }
 
 impl Section {
-    const ALL: [Section; 4] = [
+    const ALL: [Section; 5] = [
         Section::Appearance,
+        Section::Game,
         Section::MoveIn,
         Section::Accounts,
         Section::About,
@@ -31,6 +33,7 @@ impl Section {
     fn label(self) -> &'static str {
         match self {
             Section::Appearance => "Appearance",
+            Section::Game => "Game",
             Section::MoveIn => "Move in",
             Section::Accounts => "Accounts",
             Section::About => "About",
@@ -39,6 +42,7 @@ impl Section {
     fn icon(self) -> &'static str {
         match self {
             Section::Appearance => "sun",
+            Section::Game => "gamepad-2",
             Section::MoveIn => "arrow-down-to-line",
             Section::Accounts => "user",
             Section::About => "info",
@@ -50,6 +54,7 @@ pub fn render(
     shell: &mut Shell,
     section: Section,
     move_in: Option<Entity<MoveInPage>>,
+    game: Option<Entity<crate::ui::pages::game_settings::GameSettings>>,
     _window: &mut Window,
     cx: &mut Context<Shell>,
 ) -> AnyElement {
@@ -103,6 +108,10 @@ pub fn render(
     }
 
     let body: AnyElement = match section {
+        Section::Game => match game {
+            Some(page) => page.into_any_element(),
+            None => div().into_any_element(),
+        },
         Section::MoveIn => match move_in {
             Some(page) => page.into_any_element(),
             None => div().into_any_element(),

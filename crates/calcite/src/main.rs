@@ -118,6 +118,7 @@ fn main() {
                         "move-in" => Route::Settings(ui::pages::settings::Section::MoveIn),
                         "settings" => Route::Settings(ui::pages::settings::Section::Appearance),
                         "accounts" => Route::Settings(ui::pages::settings::Section::Accounts),
+                        "game-settings" => Route::Settings(ui::pages::settings::Section::Game),
                         "about" => Route::Settings(ui::pages::settings::Section::About),
                         _ => Route::Home,
                     };
@@ -156,12 +157,27 @@ fn take_snapshot(window: gpui_kit::AnyWindowHandle, page: String, out: String, c
                     .first()
                     .map(|i| i.id.clone());
                 match (page.as_str(), first) {
-                    ("instance" | "instance-logs", Some(id)) => {
-                        shell.navigate(Route::Instance(id), window, cx);
-                        if page == "instance-logs" {
-                            shell.with_instance_page(cx, |p, cx| {
-                                p.set_tab(ui::pages::instance::Tab::Logs, cx)
-                            });
+                    (
+                        "instance" | "instance-logs" | "instance-worlds" | "instance-shots"
+                        | "instance-snapshots" | "instance-settings",
+                        Some(id),
+                    ) => {
+                        use ui::pages::instance::Tab;
+                        // Prefer an instance with worlds for the world/screenshot views.
+                        let id = std::env::var("CALCITE_SNAPSHOT_INSTANCE").unwrap_or(id);
+                        shell.navigate(Route::Instance(id.clone()), window, cx);
+                        let tab = match page.as_str() {
+                            "instance-logs" => Some(Tab::Logs),
+                            "instance-worlds" => Some(Tab::Worlds),
+                            "instance-shots" => Some(Tab::Screenshots),
+                            "instance-snapshots" => Some(Tab::Snapshots),
+                            _ => None,
+                        };
+                        if let Some(tab) = tab {
+                            shell.with_instance_page(cx, |p, cx| p.set_tab(tab, cx));
+                        }
+                        if page == "instance-settings" {
+                            shell.open_instance_settings(id, window, cx);
                         }
                     }
                     ("create", _) => shell.open_create_dialog(window, cx),

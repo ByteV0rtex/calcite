@@ -1,7 +1,9 @@
 pub mod discover;
 pub mod gallery;
+pub mod game_settings;
 pub mod home;
 pub mod instance;
+pub mod instance_tabs;
 pub mod library;
 pub mod move_in;
 pub mod project;

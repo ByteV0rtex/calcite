@@ -15,6 +15,7 @@ use crate::ui::components::{
 };
 use crate::ui::create_instance::{CreateInstanceDialog, DialogEvent};
 use crate::ui::instance_picker::{InstancePicker, ProjectSummary};
+use crate::ui::instance_settings::InstanceSettings;
 use crate::ui::pages::discover::DiscoverEvent;
 use crate::ui::pages::instance::InstancePage;
 use crate::ui::pages::instance::InstancePageEvent;
@@ -74,6 +75,7 @@ pub struct Shell {
     instance_page: Option<Entity<InstancePage>>,
     project_page: Option<Entity<ProjectPage>>,
     move_in: Option<Entity<MoveInPage>>,
+    game_settings: Option<Entity<crate::ui::pages::game_settings::GameSettings>>,
     dialog: Option<gpui_kit::AnyView>,
     pub library_filter: Entity<InputState>,
     pub library_sort: LibrarySort,
@@ -115,6 +117,7 @@ impl Shell {
             instance_page: None,
             project_page: None,
             move_in: None,
+            game_settings: None,
             dialog: None,
             library_filter,
             library_sort: LibrarySort::LastPlayed,
@@ -146,6 +149,9 @@ impl Shell {
                         InstancePageEvent::AddContent(id) => {
                             this.open_discover(Some(id.clone()), window, cx)
                         }
+                        InstancePageEvent::OpenSettings(id) => {
+                            this.open_instance_settings(id.clone(), window, cx)
+                        }
                         InstancePageEvent::OpenProject(project) => {
                             this.navigate(Route::Project(project.clone(), None), window, cx)
                         }
@@ -175,6 +181,10 @@ impl Shell {
                 .detach();
                 self.project_page = Some(page);
             }
+        }
+        if route == Route::Settings(SettingsSection::Game) && self.game_settings.is_none() {
+            self.game_settings =
+                Some(cx.new(|cx| crate::ui::pages::game_settings::GameSettings::new(window, cx)));
         }
         if route == Route::Settings(SettingsSection::MoveIn) {
             self.ensure_move_in(window, cx);
@@ -255,6 +265,16 @@ impl Shell {
 
     pub fn open_create_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let dialog = cx.new(|cx| CreateInstanceDialog::new(window, cx));
+        self.show_dialog(dialog, cx);
+    }
+
+    pub fn open_instance_settings(
+        &mut self,
+        id: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let dialog = cx.new(|cx| InstanceSettings::new(id, window, cx));
         self.show_dialog(dialog, cx);
     }
 
@@ -985,7 +1005,8 @@ impl Shell {
             },
             Route::Settings(section) => {
                 let move_in = self.move_in.clone();
-                settings::render(self, section, move_in, window, cx)
+                let game = self.game_settings.clone();
+                settings::render(self, section, move_in, game, window, cx)
             }
             Route::Gallery => gallery::render(self, window, cx),
         }

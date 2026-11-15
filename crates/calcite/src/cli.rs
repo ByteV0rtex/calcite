@@ -20,7 +20,7 @@ pub fn run(args: &[String]) -> Option<i32> {
     let command = args.first()?.as_str();
     if !matches!(
         command,
-        "list" | "create" | "play" | "add" | "move-in" | "help" | "--help"
+        "list" | "create" | "play" | "add" | "content" | "move-in" | "help" | "--help"
     ) {
         return None;
     }
@@ -46,6 +46,52 @@ pub fn run(args: &[String]) -> Option<i32> {
             );
         }
         match args[0].as_str() {
+            "content" => {
+                let target = args.get(1).cloned().unwrap_or_default();
+                let instances = backend.call(theseus::instance::list()).await?;
+                let Some(meta) = instances.into_iter().find(|m| {
+                    m.instance.id == target || m.instance.name.eq_ignore_ascii_case(&target)
+                }) else {
+                    anyhow::bail!("no instance named '{target}'");
+                };
+                let id = meta.instance.id.clone();
+                let started = std::time::Instant::now();
+                let sync_id = id.clone();
+                let synced = backend
+                    .call(async move { theseus::instance::sync_content_files(&sync_id).await })
+                    .await;
+                println!(
+                    "sync: {:?} in {:?}",
+                    synced.as_ref().map(|f| f.len()),
+                    started.elapsed()
+                );
+                let items = backend
+                    .call(async move { theseus::instance::get_content_items(&id, None).await })
+                    .await?;
+                println!("{} content items in {:?}", items.len(), started.elapsed());
+                let pack_id = meta.instance.id.clone();
+                let pack = backend
+                    .call(async move {
+                        theseus::instance::get_linked_modpack_content(&pack_id, None).await
+                    })
+                    .await;
+                println!(
+                    "modpack content: {:?} in {:?}",
+                    pack.as_ref().map(|p| p.len()).map_err(|e| e.to_string()),
+                    started.elapsed()
+                );
+                for item in items.iter().take(5) {
+                    println!(
+                        "  {} ({})",
+                        item.file_name,
+                        item.project
+                            .as_ref()
+                            .map(|p| p.title.as_str())
+                            .unwrap_or("?")
+                    );
+                }
+                Ok(())
+            }
             "add" => {
                 // calcite add <instance> <modrinth project slug or id>
                 let (Some(target), Some(project)) = (args.get(1).cloned(), args.get(2).cloned())

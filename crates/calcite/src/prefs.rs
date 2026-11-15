@@ -5,12 +5,25 @@ use serde::{Deserialize, Serialize};
 
 use crate::theme::{Accent, Appearance};
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct Prefs {
     pub appearance: Appearance,
     pub accent: Accent,
     pub onboarding_done: bool,
+    /// Back up the worlds you played when the game closes.
+    pub backup_worlds_on_exit: bool,
+}
+
+impl Default for Prefs {
+    fn default() -> Self {
+        Prefs {
+            appearance: Appearance::default(),
+            accent: Accent::default(),
+            onboarding_done: false,
+            backup_worlds_on_exit: true,
+        }
+    }
 }
 
 impl gpui_kit::Global for Prefs {}
@@ -48,6 +61,12 @@ impl Prefs {
         crate::theme::apply(appearance, accent, cx);
     }
 
+    pub fn set_backup_worlds(on: bool, cx: &mut gpui_kit::App) {
+        let prefs = cx.global_mut::<Prefs>();
+        prefs.backup_worlds_on_exit = on;
+        prefs.save();
+    }
+
     pub fn finish_onboarding(cx: &mut gpui_kit::App) {
         let prefs = cx.global_mut::<Prefs>();
         prefs.onboarding_done = true;
@@ -65,6 +84,7 @@ mod tests {
             appearance: Appearance::Light,
             accent: Accent::Jade,
             onboarding_done: true,
+            backup_worlds_on_exit: false,
         };
         let json = serde_json::to_string(&prefs).unwrap();
         assert_eq!(serde_json::from_str::<Prefs>(&json).unwrap(), prefs);
@@ -72,5 +92,6 @@ mod tests {
         let old: Prefs = serde_json::from_str(r#"{"accent":"teal"}"#).unwrap();
         assert_eq!(old.accent, Accent::Teal);
         assert!(!old.onboarding_done);
+        assert!(old.backup_worlds_on_exit, "backups default to on");
     }
 }
