@@ -206,6 +206,10 @@ pub struct AppState {
     /// Game folders to bring into an instance once its install job succeeds
     /// (official launcher imports), keyed by job id.
     pending_copies: HashMap<String, (PathBuf, Option<PathBuf>)>,
+    /// Bumped whenever an instance's content changes, so open pages reload.
+    pub content_revision: HashMap<String, u64>,
+    /// Project ids being installed per instance (for "Installing…" buttons).
+    pub installing: HashMap<String, Vec<String>>,
     refresh_task: Option<Task<()>>,
 }
 
@@ -240,6 +244,8 @@ impl AppState {
             logs: HashMap::new(),
             notice: None,
             pending_copies: HashMap::new(),
+            content_revision: HashMap::new(),
+            installing: HashMap::new(),
             refresh_task: None,
         });
         cx.set_global(AppStateHandle(state.clone()));
@@ -312,10 +318,38 @@ impl AppState {
     fn handle_event(&mut self, event: AppEvent, cx: &mut Context<Self>) {
         match event {
             AppEvent::Instance(payload) => match payload.event {
-                InstancePayloadType::Created
-                | InstancePayloadType::Synced
-                | InstancePayloadType::Edited
-                | InstancePayloadType::Removed => self.schedule_refresh(cx),
+                InstancePayloadType::Created | InstancePayloadType::Removed => {
+                    self.schedule_refresh(cx)
+                }
+                InstancePayloadType::Synced | InstancePayloadType::Edited => {
+                    *self
+                        .content_revision
+                        .entry(payload.instance_id)
+                        .or_default() += 1;
+                    self.schedule_refresh(cx);
+                }
+                InstancePayloadType::ContentInstallFinished { project_ids } => {
+                    if let Some(list) = self.installing.get_mut(&payload.instance_id) {
+                        list.retain(|p| !project_ids.contains(p));
+                    }
+                    *self
+                        .content_revision
+                        .entry(payload.instance_id)
+                        .or_default() += 1;
+                }
+                InstancePayloadType::ContentInstallFailed {
+                    project_ids,
+                    message,
+                } => {
+                    if let Some(list) = self.installing.get_mut(&payload.instance_id) {
+                        list.retain(|p| !project_ids.contains(p));
+                    }
+                    let name = self
+                        .instance(&payload.instance_id)
+                        .map(|i| i.name.to_string())
+                        .unwrap_or_default();
+                    self.notify_error(format!("Couldn't add that to {name}"), message);
+                }
                 _ => {}
             },
             AppEvent::InstanceGroupsChanged(_) => self.schedule_refresh(cx),
@@ -764,6 +798,61 @@ impl AppState {
             });
         })
         .detach();
+    }
+
+    /// Add a project (and whatever it depends on) to an instance. With no
+    /// version given, the backend picks the newest one that fits.
+    pub fn install_content(
+        &mut self,
+        instance_id: String,
+        project_id: String,
+        version_id: Option<String>,
+        content_type: theseus::data::ContentType,
+        cx: &mut Context<Self>,
+    ) {
+        self.installing
+            .entry(instance_id.clone())
+            .or_default()
+            .push(project_id.clone());
+        cx.notify();
+        let id = instance_id.clone();
+        let project = project_id.clone();
+        let install = Backend::global(cx).call(async move {
+            theseus::instance::install_project_with_dependencies(
+                &id,
+                theseus::instance::InstallProjectWithDependenciesRequest {
+                    project_id: project,
+                    version_id,
+                    content_type,
+                    selected: Default::default(),
+                },
+            )
+            .await
+        });
+        cx.spawn(async move |this, cx| {
+            let result = install.await;
+            let _ = this.update(cx, |this, cx| {
+                if let Err(error) = result {
+                    if let Some(list) = this.installing.get_mut(&instance_id) {
+                        list.retain(|p| p != &project_id);
+                    }
+                    this.notify_error("Couldn't add that", format!("{error:#}"));
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Follow an install job the UI started (progress card, completion).
+    pub fn track_job(&mut self, snapshot: InstallJobSnapshot, cx: &mut Context<Self>) {
+        self.handle_event(AppEvent::InstallJob(snapshot.into()), cx);
+    }
+
+    pub fn is_installing(&self, instance_id: &str, project_id: &str) -> bool {
+        self.installing
+            .get(instance_id)
+            .is_some_and(|l| l.iter().any(|p| p == project_id))
     }
 
     pub fn set_default_account(&mut self, id: uuid::Uuid, cx: &mut Context<Self>) {

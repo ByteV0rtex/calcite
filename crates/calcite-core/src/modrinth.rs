@@ -254,6 +254,128 @@ pub fn compare_game_versions(a: &str, b: &str) -> std::cmp::Ordering {
     parse(a).cmp(&parse(b))
 }
 
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+pub struct GalleryImage {
+    /// Pre-resized (350px) image for thumbnails.
+    pub url: String,
+    pub raw_url: Option<String>,
+    #[serde(default)]
+    pub featured: bool,
+    pub title: Option<String>,
+    pub description: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+pub struct License {
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+pub struct Project {
+    pub id: String,
+    pub slug: String,
+    pub project_type: String,
+    pub team: String,
+    pub title: String,
+    pub description: String,
+    #[serde(default)]
+    pub body: String,
+    pub published: String,
+    pub updated: String,
+    pub license: Option<License>,
+    pub downloads: u64,
+    pub followers: u64,
+    #[serde(default)]
+    pub categories: Vec<String>,
+    #[serde(default)]
+    pub loaders: Vec<String>,
+    #[serde(default)]
+    pub game_versions: Vec<String>,
+    pub icon_url: Option<String>,
+    pub issues_url: Option<String>,
+    pub source_url: Option<String>,
+    pub wiki_url: Option<String>,
+    pub discord_url: Option<String>,
+    #[serde(default)]
+    pub gallery: Vec<GalleryImage>,
+    pub client_side: Option<String>,
+    pub server_side: Option<String>,
+}
+
+impl Project {
+    pub fn project_type(&self) -> ProjectType {
+        match self.project_type.as_str() {
+            "mod" => ProjectType::Mod,
+            "resourcepack" => ProjectType::Resourcepack,
+            "shader" => ProjectType::Shader,
+            "datapack" => ProjectType::Datapack,
+            "plugin" => ProjectType::Plugin,
+            _ => ProjectType::Modpack,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+pub struct VersionFile {
+    pub url: String,
+    pub filename: String,
+    #[serde(default)]
+    pub primary: bool,
+    pub size: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+pub struct Version {
+    pub id: String,
+    pub project_id: String,
+    pub name: String,
+    pub version_number: String,
+    #[serde(default)]
+    pub changelog: Option<String>,
+    pub date_published: String,
+    pub downloads: u64,
+    /// "release", "beta" or "alpha".
+    pub version_type: String,
+    #[serde(default)]
+    pub game_versions: Vec<String>,
+    #[serde(default)]
+    pub loaders: Vec<String>,
+    #[serde(default)]
+    pub files: Vec<VersionFile>,
+}
+
+impl Version {
+    /// "1.20.1–1.21.4" style summary of the supported game versions.
+    pub fn game_version_summary(&self) -> String {
+        let mut releases: Vec<&str> = self
+            .game_versions
+            .iter()
+            .map(String::as_str)
+            .filter(|v| is_release_version(v))
+            .collect();
+        releases.sort_by(|a, b| compare_game_versions(a, b));
+        match (releases.first(), releases.last()) {
+            (Some(first), Some(last)) if first == last => first.to_string(),
+            (Some(first), Some(last)) => format!("{first}–{last}"),
+            _ => self.game_versions.first().cloned().unwrap_or_default(),
+        }
+    }
+
+    /// Supports this loader (resource packs and shaders are loader-free).
+    pub fn supports(&self, loader: &str, game_version: &str) -> bool {
+        let loader_ok = self.loaders.iter().any(|l| l == loader)
+            || self.loaders.iter().all(|l| {
+                matches!(
+                    l.as_str(),
+                    "minecraft" | "iris" | "optifine" | "canvas" | "datapack"
+                )
+            });
+        loader_ok && self.game_versions.iter().any(|v| v == game_version)
+    }
+}
+
 /// Shared HTTP client for Modrinth's API and CDN.
 #[derive(Clone)]
 pub struct Client {
@@ -286,6 +408,59 @@ impl Client {
             .await?
             .error_for_status()?;
         Ok(response.json().await?)
+    }
+
+    pub async fn project(&self, id_or_slug: &str) -> anyhow::Result<Project> {
+        let response = self
+            .http
+            .get(format!("{}/project/{id_or_slug}", self.base))
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(response.json().await?)
+    }
+
+    /// Every version of a project, newest first.
+    pub async fn versions(&self, id_or_slug: &str) -> anyhow::Result<Vec<Version>> {
+        let response = self
+            .http
+            .get(format!("{}/project/{id_or_slug}/version", self.base))
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(response.json().await?)
+    }
+
+    pub async fn version(&self, id: &str) -> anyhow::Result<Version> {
+        let response = self
+            .http
+            .get(format!("{}/version/{id}", self.base))
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(response.json().await?)
+    }
+
+    /// Release game versions, newest first (for filters).
+    pub async fn release_game_versions(&self) -> anyhow::Result<Vec<String>> {
+        #[derive(Deserialize)]
+        struct Tag {
+            version: String,
+            version_type: String,
+        }
+        let tags: Vec<Tag> = self
+            .http
+            .get(format!("{}/tag/game_version", self.base))
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        Ok(tags
+            .into_iter()
+            .filter(|t| t.version_type == "release")
+            .map(|t| t.version)
+            .collect())
     }
 
     /// Download raw bytes (icons, gallery images).
@@ -332,6 +507,30 @@ mod tests {
             compare_game_versions("1.21.10", "1.21.9"),
             std::cmp::Ordering::Greater
         );
+    }
+
+    #[test]
+    fn version_summaries_and_support() {
+        let v: Version = serde_json::from_value(serde_json::json!({
+            "id": "v", "project_id": "p", "name": "n", "version_number": "1.0",
+            "date_published": "2026-01-01T00:00:00Z", "downloads": 3,
+            "version_type": "release",
+            "game_versions": ["1.21.4", "1.20.1", "1.21.1", "26.4-snapshot-1"],
+            "loaders": ["fabric", "quilt"], "files": []
+        }))
+        .unwrap();
+        assert_eq!(v.game_version_summary(), "1.20.1–1.21.4");
+        assert!(v.supports("fabric", "1.21.1"));
+        assert!(!v.supports("forge", "1.21.1"));
+        assert!(!v.supports("fabric", "1.19.2"));
+        let pack: Version = serde_json::from_value(serde_json::json!({
+            "id": "v", "project_id": "p", "name": "n", "version_number": "1.0",
+            "date_published": "2026-01-01T00:00:00Z", "downloads": 3,
+            "version_type": "release", "game_versions": ["1.21.1"],
+            "loaders": ["minecraft"], "files": []
+        }))
+        .unwrap();
+        assert!(pack.supports("fabric", "1.21.1"));
     }
 
     #[test]

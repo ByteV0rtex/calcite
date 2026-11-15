@@ -14,8 +14,12 @@ use crate::ui::components::{
     Button, empty_state, icon, progress_bar, short_duration, state_chip, thumb,
 };
 use crate::ui::create_instance::{CreateInstanceDialog, DialogEvent};
+use crate::ui::instance_picker::{InstancePicker, ProjectSummary};
+use crate::ui::pages::discover::DiscoverEvent;
 use crate::ui::pages::instance::InstancePage;
+use crate::ui::pages::instance::InstancePageEvent;
 use crate::ui::pages::move_in::MoveInPage;
+use crate::ui::pages::project::{ProjectEvent, ProjectPage};
 use crate::ui::pages::settings::{self, Section as SettingsSection};
 use crate::ui::pages::{discover::DiscoverPage, gallery, home, library};
 
@@ -30,6 +34,8 @@ pub enum Route {
     Library,
     Discover,
     Instance(String),
+    /// A Modrinth project, optionally being added to an instance.
+    Project(String, Option<String>),
     Settings(SettingsSection),
     Gallery,
 }
@@ -66,8 +72,9 @@ pub struct Shell {
     state: Entity<AppState>,
     discover: Entity<DiscoverPage>,
     instance_page: Option<Entity<InstancePage>>,
+    project_page: Option<Entity<ProjectPage>>,
     move_in: Option<Entity<MoveInPage>>,
-    dialog: Option<Entity<CreateInstanceDialog>>,
+    dialog: Option<gpui_kit::AnyView>,
     pub library_filter: Entity<InputState>,
     pub library_sort: LibrarySort,
     account_menu_open: bool,
@@ -83,6 +90,16 @@ impl Shell {
             cx.new(|cx| InputState::new(window, cx).placeholder("Filter instances"));
         let subscriptions = vec![
             cx.observe(&state, |_, _, cx| cx.notify()),
+            cx.subscribe_in(
+                &discover,
+                window,
+                |this, _, event: &DiscoverEvent, window, cx| match event {
+                    DiscoverEvent::OpenProject { id, target } => {
+                        this.navigate(Route::Project(id.clone(), target.clone()), window, cx)
+                    }
+                    DiscoverEvent::AddTo(summary) => this.open_picker(summary.clone(), window, cx),
+                },
+            ),
             cx.subscribe(&library_filter, |_, _, event: &InputEvent, cx| {
                 if matches!(event, InputEvent::Change) {
                     cx.notify();
@@ -96,6 +113,7 @@ impl Shell {
             state,
             discover,
             instance_page: None,
+            project_page: None,
             move_in: None,
             dialog: None,
             library_filter,
@@ -120,7 +138,42 @@ impl Shell {
                 .is_some_and(|page| page.read(cx).id() == id);
             if !reuse {
                 let id = id.clone();
-                self.instance_page = Some(cx.new(|cx| InstancePage::new(id, window, cx)));
+                let page = cx.new(|cx| InstancePage::new(id, window, cx));
+                cx.subscribe_in(
+                    &page,
+                    window,
+                    |this, _, event: &InstancePageEvent, window, cx| match event {
+                        InstancePageEvent::AddContent(id) => {
+                            this.open_discover(Some(id.clone()), window, cx)
+                        }
+                        InstancePageEvent::OpenProject(project) => {
+                            this.navigate(Route::Project(project.clone(), None), window, cx)
+                        }
+                    },
+                )
+                .detach();
+                self.instance_page = Some(page);
+            }
+        }
+        if let Route::Project(id, target) = &route {
+            let reuse = self
+                .project_page
+                .as_ref()
+                .is_some_and(|page| page.read(cx).id() == id);
+            if !reuse {
+                let (id, target) = (id.clone(), target.clone());
+                let page = cx.new(|cx| ProjectPage::new(id, target, cx));
+                cx.subscribe_in(
+                    &page,
+                    window,
+                    |this, _, event: &ProjectEvent, window, cx| match event {
+                        ProjectEvent::AddTo(summary) => {
+                            this.open_picker(summary.clone(), window, cx)
+                        }
+                    },
+                )
+                .detach();
+                self.project_page = Some(page);
             }
         }
         if route == Route::Settings(SettingsSection::MoveIn) {
@@ -202,6 +255,25 @@ impl Shell {
 
     pub fn open_create_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let dialog = cx.new(|cx| CreateInstanceDialog::new(window, cx));
+        self.show_dialog(dialog, cx);
+    }
+
+    /// "Add to instance" for a project.
+    pub fn open_picker(
+        &mut self,
+        project: ProjectSummary,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let picker = cx.new(|cx| InstancePicker::new(project, window, cx));
+        self.show_dialog(picker, cx);
+    }
+
+    fn show_dialog<V: Render + gpui_kit::EventEmitter<DialogEvent>>(
+        &mut self,
+        dialog: Entity<V>,
+        cx: &mut Context<Self>,
+    ) {
         cx.subscribe(&dialog, |this, _, event: &DialogEvent, cx| match event {
             DialogEvent::Close => {
                 this.dialog = None;
@@ -209,8 +281,20 @@ impl Shell {
             }
         })
         .detach();
-        self.dialog = Some(dialog);
+        self.dialog = Some(dialog.into());
         cx.notify();
+    }
+
+    /// Discover, either for everything or scoped to one instance.
+    pub fn open_discover(
+        &mut self,
+        target: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.discover
+            .update(cx, |page, cx| page.set_target(target, window, cx));
+        self.navigate(Route::Discover, window, cx);
     }
 
     /// Run `f` against the open instance page, if one is showing.
@@ -232,6 +316,11 @@ impl Shell {
 
     fn instance_title(&self, cx: &App) -> SharedString {
         match &self.route {
+            Route::Project(..) => self
+                .project_page
+                .as_ref()
+                .map(|p| p.read(cx).title())
+                .unwrap_or_default(),
             Route::Instance(id) => self
                 .state
                 .read(cx)
@@ -270,7 +359,12 @@ impl Shell {
         };
 
         let mut crumbs = div().flex().items_center().gap(space(1.5)).min_w_0();
-        if matches!(self.route, Route::Instance(_)) {
+        let parent = match &self.route {
+            Route::Instance(_) => Some(("Library", Route::Library)),
+            Route::Project(..) => Some(("Discover", Route::Discover)),
+            _ => None,
+        };
+        if let Some((parent_label, parent_route)) = parent {
             crumbs = crumbs
                 .child(
                     div()
@@ -279,10 +373,10 @@ impl Shell {
                         .text_color(p.text_muted)
                         .cursor_pointer()
                         .hover(|s| s.text_color(p.text_secondary))
-                        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                            this.navigate(Route::Library, window, cx)
+                        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                            this.navigate(parent_route.clone(), window, cx)
                         }))
-                        .child("Library"),
+                        .child(parent_label),
                 )
                 .child(icon("chevron-right", 14.0, p.text_disabled))
                 .child(
@@ -352,7 +446,7 @@ impl Shell {
                     .cursor_pointer()
                     .hover(|s| s.border_color(p.border_strong))
                     .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                        this.navigate(Route::Discover, window, cx)
+                        this.open_discover(None, window, cx)
                     }))
                     .child(icon("search", 14.0, p.text_muted))
                     .child(
@@ -435,7 +529,11 @@ impl Shell {
                         .hover(|s| s.bg(p.hover).text_color(p.text))
                 })
                 .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                    this.navigate(target.clone(), window, cx)
+                    if target == Route::Discover {
+                        this.open_discover(None, window, cx)
+                    } else {
+                        this.navigate(target.clone(), window, cx)
+                    }
                 }))
                 .child(icon(
                     name,
@@ -877,6 +975,10 @@ impl Shell {
             Route::Home => home::render(self, window, cx),
             Route::Library => library::render(self, window, cx),
             Route::Discover => self.discover.clone().into_any_element(),
+            Route::Project(..) => match &self.project_page {
+                Some(page) => page.clone().into_any_element(),
+                None => div().into_any_element(),
+            },
             Route::Instance(_) => match &self.instance_page {
                 Some(page) => page.clone().into_any_element(),
                 None => div().into_any_element(),

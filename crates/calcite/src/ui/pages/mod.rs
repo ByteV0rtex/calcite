@@ -4,6 +4,7 @@ pub mod home;
 pub mod instance;
 pub mod library;
 pub mod move_in;
+pub mod project;
 pub mod settings;
 
 use gpui_kit::prelude::*;

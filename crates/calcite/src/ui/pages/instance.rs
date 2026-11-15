@@ -64,6 +64,8 @@ struct Row {
     icon_url: Option<String>,
     enabled: bool,
     has_update: bool,
+    update_version: Option<String>,
+    project_id: Option<String>,
     kind: ProjectType,
 }
 
@@ -87,6 +89,8 @@ impl Row {
             icon_url: item.project.as_ref().and_then(|p| p.icon_url.clone()),
             enabled: item.enabled,
             has_update: item.has_update,
+            update_version: item.update_version_id.clone(),
+            project_id: item.project.as_ref().map(|p| p.id.clone()),
             kind: item.project_type,
             path: item.file_path,
             file_name: file_name.into(),
@@ -94,8 +98,17 @@ impl Row {
     }
 }
 
+pub enum InstancePageEvent {
+    /// Open Discover filtered to this instance.
+    AddContent(String),
+    OpenProject(String),
+}
+
+impl gpui_kit::EventEmitter<InstancePageEvent> for InstancePage {}
+
 pub struct InstancePage {
     id: String,
+    seen_revision: u64,
     tab: Tab,
     filter: Filter,
     content: Option<Result<Vec<Row>, String>>,
@@ -109,14 +122,32 @@ pub struct InstancePage {
 impl InstancePage {
     pub fn new(id: String, _window: &mut Window, cx: &mut Context<Self>) -> Self {
         let state = AppState::global(cx);
-        let subscriptions = vec![cx.observe(&state, |this, _, cx| {
+        let subscriptions = vec![cx.observe(&state, |this, state, cx| {
+            // Reload content whenever the backend says it changed.
+            let revision = state
+                .read(cx)
+                .content_revision
+                .get(&this.id)
+                .copied()
+                .unwrap_or(0);
+            if revision != this.seen_revision {
+                this.seen_revision = revision;
+                this.load_content(cx);
+            }
             if this.follow_logs && this.tab == Tab::Logs {
                 this.log_scroll
                     .scroll_to_item(usize::MAX, gpui_kit::ScrollStrategy::Bottom);
             }
             cx.notify()
         })];
+        let seen_revision = state
+            .read(cx)
+            .content_revision
+            .get(&id)
+            .copied()
+            .unwrap_or(0);
         let mut page = InstancePage {
+            seen_revision,
             id,
             tab: Tab::Content,
             filter: Filter::All,
@@ -129,7 +160,70 @@ impl InstancePage {
         };
         page.load_content(cx);
         page.load_log_buffer(cx);
+        page.check_updates(cx);
         page
+    }
+
+    /// Ask Modrinth for newer versions of everything, then reload.
+    fn check_updates(&mut self, cx: &mut Context<Self>) {
+        let id = self.id.clone();
+        let check = Backend::global(cx)
+            .call(async move { theseus::instance::refresh_content_updates(&id).await });
+        cx.spawn(async move |this, cx| {
+            if check.await.is_ok() {
+                let _ = this.update(cx, |this, cx| this.load_content(cx));
+            }
+        })
+        .detach();
+    }
+
+    fn update_one(&mut self, path: String, cx: &mut Context<Self>) {
+        let id = self.id.clone();
+        self.busy_paths.push(path.clone());
+        cx.notify();
+        let call = Backend::global(cx)
+            .call(async move { theseus::instance::update_project(&id, &path, None).await });
+        self.after(call, "Couldn't update that", cx);
+    }
+
+    fn update_all(&mut self, cx: &mut Context<Self>) {
+        let Some(Ok(rows)) = &self.content else {
+            return;
+        };
+        let updates: Vec<theseus::install::ContentUpdateSelection> = rows
+            .iter()
+            .filter(|r| r.has_update)
+            .filter_map(|r| {
+                Some(theseus::install::ContentUpdateSelection {
+                    project_path: r.path.clone(),
+                    version_id: r.update_version.clone()?,
+                })
+            })
+            .collect();
+        if updates.is_empty() {
+            return;
+        }
+        self.busy_paths
+            .extend(updates.iter().map(|u| u.project_path.clone()));
+        cx.notify();
+        let id = self.id.clone();
+        let state = self.state.clone();
+        let call = Backend::global(cx)
+            .call(async move { theseus::install::bulk_update_content(id, updates).await });
+        cx.spawn(async move |this, cx| {
+            let result = call.await;
+            state.update(cx, |state, cx| {
+                match result {
+                    Ok(snapshot) => state.track_job(snapshot, cx),
+                    Err(error) => {
+                        state.notify_error("Couldn't start the update", format!("{error:#}"))
+                    }
+                }
+                cx.notify();
+            });
+            let _ = this.update(cx, |_, cx| cx.notify());
+        })
+        .detach();
     }
 
     pub fn id(&self) -> &str {
@@ -558,6 +652,10 @@ impl InstancePage {
             );
         }
 
+        let updates = rows
+            .iter()
+            .filter(|r| r.has_update && r.update_version.is_some())
+            .count();
         let toolbar = div()
             .flex()
             .items_center()
@@ -566,12 +664,32 @@ impl InstancePage {
             .py(space(3.0))
             .child(filters)
             .child(div().flex_1())
+            .when(updates > 0, |d| {
+                d.child(
+                    Button::new("update-all")
+                        .icon("refresh-cw")
+                        .label(format!("Update {updates}"))
+                        .small()
+                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.update_all(cx))),
+                )
+            })
             .child(
                 Button::new("add-files")
-                    .icon("plus")
+                    .icon("folder-open")
                     .label("Add files")
                     .small()
+                    .ghost()
                     .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.add_files(cx))),
+            )
+            .child(
+                Button::new("add-content")
+                    .icon("plus")
+                    .label("Add content")
+                    .small()
+                    .primary()
+                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                        cx.emit(InstancePageEvent::AddContent(this.id.clone()))
+                    })),
             );
 
         let visible: Vec<Row> = rows
@@ -587,7 +705,7 @@ impl InstancePage {
                 .child(empty_state(
                     "package",
                     "Nothing installed yet",
-                    "Add mods, resource packs or shaders as files from your computer. Installing from Modrinth into an instance comes with the next update.",
+                    "Use Add content to browse mods, packs and shaders that fit this instance, or add files from your computer.",
                     None,
                     cx,
                 ))
@@ -654,10 +772,22 @@ impl InstancePage {
                                     .min_w_0()
                                     .child(
                                         div()
+                                            .id(SharedString::from(format!("title-{ix}")))
                                             .truncate()
                                             .text_size(px(type_scale::BODY))
                                             .font_weight(FontWeight::MEDIUM)
                                             .text_color(p.text)
+                                            .when_some(row.project_id.clone(), |d, project| {
+                                                d.cursor_pointer()
+                                                    .hover(|s| s.text_color(p.accent_text))
+                                                    .on_click(cx.listener(
+                                                        move |_, _: &ClickEvent, _, cx| {
+                                                            cx.emit(InstancePageEvent::OpenProject(
+                                                                project.clone(),
+                                                            ))
+                                                        },
+                                                    ))
+                                            })
                                             .child(row.title.clone()),
                                     )
                                     .when_some(row.author.clone(), |d, a| {
@@ -686,8 +816,19 @@ impl InstancePage {
                             .items_center()
                             .justify_end()
                             .gap(space(2.0))
-                            .when(row.has_update, |d| {
-                                d.child(div().size(px(6.0)).rounded_full().bg(p.accent))
+                            .when(row.has_update && row.update_version.is_some(), |d| {
+                                let path = row.path.clone();
+                                d.child(
+                                    Button::new(SharedString::from(format!("update-{ix}")))
+                                        .icon("refresh-cw")
+                                        .label("Update")
+                                        .small()
+                                        .on_click(cx.listener(
+                                            move |this, _: &ClickEvent, _, cx| {
+                                                this.update_one(path.clone(), cx)
+                                            },
+                                        )),
+                                )
                             })
                             .child(
                                 div()

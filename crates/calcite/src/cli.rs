@@ -20,7 +20,7 @@ pub fn run(args: &[String]) -> Option<i32> {
     let command = args.first()?.as_str();
     if !matches!(
         command,
-        "list" | "create" | "play" | "move-in" | "help" | "--help"
+        "list" | "create" | "play" | "add" | "move-in" | "help" | "--help"
     ) {
         return None;
     }
@@ -46,6 +46,68 @@ pub fn run(args: &[String]) -> Option<i32> {
             );
         }
         match args[0].as_str() {
+            "add" => {
+                // calcite add <instance> <modrinth project slug or id>
+                let (Some(target), Some(project)) = (args.get(1).cloned(), args.get(2).cloned())
+                else {
+                    anyhow::bail!("usage: calcite add <instance> <project>");
+                };
+                let instances = backend.call(theseus::instance::list()).await?;
+                let Some(meta) = instances.into_iter().find(|m| {
+                    m.instance.id == target || m.instance.name.eq_ignore_ascii_case(&target)
+                }) else {
+                    anyhow::bail!("no instance named '{target}'");
+                };
+                let id = meta.instance.id.clone();
+                let client = calcite_core::modrinth::Client::new(&calcite_core::user_agent())?;
+                let info = backend
+                    .run(async move { client.project(&project).await })
+                    .await??;
+                let kind = crate::ui::instance_picker::content_type(info.project_type());
+                let (install_id, project_id) = (id.clone(), info.id.clone());
+                let plan = backend
+                    .call(async move {
+                        theseus::instance::install_project_with_dependencies(
+                            &install_id,
+                            theseus::instance::InstallProjectWithDependenciesRequest {
+                                project_id,
+                                version_id: None,
+                                content_type: kind,
+                                selected: Default::default(),
+                            },
+                        )
+                        .await
+                    })
+                    .await?;
+                println!(
+                    "Adding {} (+{} dependencies) to {}…",
+                    info.title,
+                    plan.dependencies.len(),
+                    meta.instance.name
+                );
+                while let Some(event) = events.next().await {
+                    if let AppEvent::Instance(p) = event
+                        && p.instance_id == id
+                    {
+                        match p.event {
+                            theseus::event::InstancePayloadType::ContentInstallFinished {
+                                ..
+                            } => {
+                                println!("Done.");
+                                return Ok(());
+                            }
+                            theseus::event::InstancePayloadType::ContentInstallFailed {
+                                message,
+                                ..
+                            } => {
+                                anyhow::bail!("install failed: {message}")
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                Ok(())
+            }
             "move-in" => {
                 let dir = calcite_core::transfer::modrinth_app_dir()
                     .ok_or_else(|| anyhow::anyhow!("Modrinth App isn't installed"))?;

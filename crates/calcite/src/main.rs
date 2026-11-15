@@ -166,6 +166,18 @@ fn take_snapshot(window: gpui_kit::AnyWindowHandle, page: String, out: String, c
                     }
                     ("create", _) => shell.open_create_dialog(window, cx),
                     ("onboarding-movein", _) => shell.set_onboarding_step(1, window, cx),
+                    ("project", _) => shell.navigate(Route::Project("sodium".into(), None), window, cx),
+                    ("discover-instance", Some(id)) => shell.open_discover(Some(id), window, cx),
+                    ("picker", _) => shell.open_picker(
+                        ui::instance_picker::ProjectSummary {
+                            id: "AANobbMI".into(),
+                            title: "Sodium".into(),
+                            icon_url: Some("https://cdn.modrinth.com/data/AANobbMI/295862f4724dc3f78df3447ad6072b2dcd3ef0c9_96.webp".into()),
+                            kind: calcite_core::modrinth::ProjectType::Mod,
+                        },
+                        window,
+                        cx,
+                    ),
                     _ => {}
                 }
             });

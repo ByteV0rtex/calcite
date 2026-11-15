@@ -3,6 +3,7 @@
 
 pub mod clone;
 pub mod launchers;
+pub mod markup;
 pub mod modrinth;
 pub mod transfer;
 
