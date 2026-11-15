@@ -1,0 +1,698 @@
+//! Live application state, kept in sync with the launcher backend.
+//!
+//! The backend is the source of truth. This entity holds a UI-friendly copy
+//! that views observe. Backend events (instance changes, game start/stop,
+//! install progress, log lines) update it as they arrive; nothing polls.
+
+use std::collections::{HashMap, VecDeque};
+use std::path::PathBuf;
+use std::time::Duration;
+
+use chrono::{DateTime, Utc};
+use gpui_kit::{App, AppContext as _, Context, Entity, Global, SharedString, Task};
+use theseus::AppEvent;
+use theseus::data::{InstanceMetadata, ModLoader};
+use theseus::event::{InstancePayloadType, ProcessPayloadType};
+use theseus::install::{InstallJobSnapshot, InstallJobStatus};
+
+use crate::backend::Backend;
+
+/// Most log lines kept per instance. Older lines live in the log files.
+const LOG_LINES_KEPT: usize = 4000;
+
+#[derive(Clone, Debug)]
+pub struct InstanceInfo {
+    pub id: String,
+    pub name: SharedString,
+    pub icon_path: Option<PathBuf>,
+    pub loader: ModLoader,
+    pub game_version: SharedString,
+    pub loader_version: Option<SharedString>,
+    pub last_played: Option<DateTime<Utc>>,
+    pub created: DateTime<Utc>,
+    pub played_secs: u64,
+    pub installed: bool,
+    pub group_ids: Vec<String>,
+    pub is_modpack: bool,
+}
+
+impl InstanceInfo {
+    fn from_metadata(meta: InstanceMetadata) -> Self {
+        let set = &meta.applied_content_set;
+        InstanceInfo {
+            id: meta.instance.id.clone(),
+            name: meta.instance.name.clone().into(),
+            icon_path: meta.instance.icon_path.as_ref().map(PathBuf::from),
+            loader: set.loader,
+            game_version: set.game_version.clone().into(),
+            loader_version: set.loader_version.clone().map(Into::into),
+            last_played: meta.instance.last_played,
+            created: meta.instance.created,
+            played_secs: meta
+                .instance
+                .submitted_time_played
+                .saturating_add(meta.instance.recent_time_played),
+            installed: meta.instance.install_stage.as_str() == "installed",
+            group_ids: meta.group_ids.clone(),
+            is_modpack: !matches!(meta.link, theseus::data::InstanceLink::Unmanaged),
+        }
+    }
+
+    /// "Fabric 1.21.4", "Vanilla 26.3".
+    pub fn loader_line(&self) -> String {
+        format!("{} {}", loader_name(self.loader), self.game_version)
+    }
+}
+
+pub fn loader_name(loader: ModLoader) -> &'static str {
+    match loader {
+        ModLoader::Vanilla => "Vanilla",
+        ModLoader::Fabric => "Fabric",
+        ModLoader::Quilt => "Quilt",
+        ModLoader::Forge => "Forge",
+        ModLoader::NeoForge => "NeoForge",
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct Running {
+    pub started: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug)]
+pub struct Job {
+    pub id: String,
+    pub instance_id: Option<String>,
+    pub title: SharedString,
+    pub phase: &'static str,
+    pub current: u64,
+    pub total: u64,
+    pub status: InstallJobStatus,
+    pub error: Option<String>,
+}
+
+impl Job {
+    fn from_snapshot(s: &InstallJobSnapshot) -> Self {
+        let (current, total) = s
+            .progress
+            .as_ref()
+            .map(|p| (p.current, p.total))
+            .unwrap_or((0, 0));
+        Job {
+            id: s.job_id.clone(),
+            instance_id: s.instance_id.clone(),
+            title: s
+                .display
+                .as_ref()
+                .map(|d| d.title.clone())
+                .unwrap_or_else(|| "Installing".into())
+                .into(),
+            phase: phase_label(&phase_key(&s.phase)),
+            current,
+            total,
+            status: s.status,
+            error: s
+                .error
+                .as_ref()
+                .and_then(|e| serde_json::to_value(e).ok())
+                .and_then(|v| {
+                    v.get("message")
+                        .and_then(|m| m.as_str())
+                        .map(str::to_string)
+                }),
+        }
+    }
+
+    pub fn fraction(&self) -> f32 {
+        if self.total == 0 {
+            0.0
+        } else {
+            (self.current as f64 / self.total as f64) as f32
+        }
+    }
+
+    pub fn is_active(&self) -> bool {
+        matches!(
+            self.status,
+            InstallJobStatus::Queued | InstallJobStatus::Running
+        )
+    }
+}
+
+/// The snake_case name of an install phase, as the backend serializes it.
+pub fn phase_key(phase: &theseus::install::InstallPhaseId) -> String {
+    serde_json::to_value(phase)
+        .ok()
+        .and_then(|v| v.as_str().map(str::to_string))
+        .unwrap_or_default()
+}
+
+/// Short, player-facing names for install phases.
+fn phase_label(phase: &str) -> &'static str {
+    match phase {
+        "preparing_instance" => "Preparing",
+        "resolving_pack" | "reading_pack_manifest" => "Reading modpack",
+        "downloading_pack_file" => "Downloading modpack",
+        "downloading_content" => "Downloading mods",
+        "extracting_overrides" => "Unpacking files",
+        "resolving_minecraft" | "downloading_minecraft" => "Downloading Minecraft",
+        "resolving_loader" | "running_loader_processors" => "Installing mod loader",
+        "preparing_java" => "Setting up Java",
+        "finalizing" => "Finishing up",
+        "rolling_back" => "Undoing changes",
+        _ => "Working",
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct Account {
+    pub id: uuid::Uuid,
+    pub name: SharedString,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum LogLevel {
+    Info,
+    Warn,
+    Error,
+    Debug,
+}
+
+#[derive(Clone, Debug)]
+pub struct LogLine {
+    pub time: SharedString,
+    pub level: LogLevel,
+    pub text: SharedString,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum BackendStatus {
+    Starting,
+    Ready,
+    Failed(String),
+}
+
+pub struct AppState {
+    pub status: BackendStatus,
+    pub instances: Vec<InstanceInfo>,
+    pub groups: Vec<(String, SharedString)>,
+    pub running: HashMap<String, Running>,
+    pub jobs: Vec<Job>,
+    pub accounts: Vec<Account>,
+    pub default_account: Option<uuid::Uuid>,
+    pub logs: HashMap<String, VecDeque<LogLine>>,
+    /// A message for the user that hasn't been dismissed yet.
+    pub notice: Option<Notice>,
+    refresh_task: Option<Task<()>>,
+}
+
+#[derive(Clone, Debug)]
+pub struct Notice {
+    pub title: SharedString,
+    pub body: SharedString,
+    pub is_error: bool,
+}
+
+pub struct AppStateHandle(pub Entity<AppState>);
+impl Global for AppStateHandle {}
+
+impl AppState {
+    pub fn global(cx: &App) -> Entity<AppState> {
+        cx.global::<AppStateHandle>().0.clone()
+    }
+
+    /// Create the state, start the backend, and pump its events.
+    pub fn start(
+        events: futures::channel::mpsc::UnboundedReceiver<AppEvent>,
+        cx: &mut App,
+    ) -> Entity<AppState> {
+        let state = cx.new(|_| AppState {
+            status: BackendStatus::Starting,
+            instances: Vec::new(),
+            groups: Vec::new(),
+            running: HashMap::new(),
+            jobs: Vec::new(),
+            accounts: Vec::new(),
+            default_account: None,
+            logs: HashMap::new(),
+            notice: None,
+            refresh_task: None,
+        });
+        cx.set_global(AppStateHandle(state.clone()));
+
+        let init = Backend::global(cx).init_state();
+        let weak = state.downgrade();
+        let started = std::time::Instant::now();
+        cx.spawn(async move |cx| {
+            let result = init.await;
+            tracing::info!(
+                "backend init finished in {:?}: {}",
+                started.elapsed(),
+                if result.is_ok() { "ok" } else { "failed" }
+            );
+            let updated = weak.update(cx, |this, cx| match result {
+                Ok(()) => {
+                    this.status = BackendStatus::Ready;
+                    this.refresh_all(cx);
+                    cx.notify();
+                }
+                Err(error) => {
+                    tracing::error!("backend failed to start: {error:#}");
+                    this.status = BackendStatus::Failed(format!("{error:#}"));
+                    cx.notify();
+                }
+            });
+            if updated.is_err() {
+                tracing::warn!("app state was dropped before the backend finished starting");
+            }
+        })
+        .detach();
+
+        let weak = state.downgrade();
+        cx.spawn(async move |cx| {
+            use futures::StreamExt as _;
+            let mut events = events.ready_chunks(256);
+            while let Some(batch) = events.next().await {
+                if weak
+                    .update(cx, |this, cx| {
+                        for event in batch {
+                            this.handle_event(event, cx);
+                        }
+                        cx.notify();
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
+
+        state
+    }
+
+    fn handle_event(&mut self, event: AppEvent, cx: &mut Context<Self>) {
+        match event {
+            AppEvent::Instance(payload) => match payload.event {
+                InstancePayloadType::Created
+                | InstancePayloadType::Synced
+                | InstancePayloadType::Edited
+                | InstancePayloadType::Removed => self.schedule_refresh(cx),
+                _ => {}
+            },
+            AppEvent::InstanceGroupsChanged(_) => self.schedule_refresh(cx),
+            AppEvent::Process(payload) => match payload.event {
+                ProcessPayloadType::Launched => {
+                    self.logs.remove(&payload.instance_id);
+                    self.running.insert(
+                        payload.instance_id,
+                        Running {
+                            started: Utc::now(),
+                        },
+                    );
+                }
+                ProcessPayloadType::Finished => {
+                    self.running.remove(&payload.instance_id);
+                    // Playtime and "last played" changed.
+                    self.schedule_refresh(cx);
+                }
+            },
+            AppEvent::InstallJob(snapshot) => {
+                let job = Job::from_snapshot(&snapshot);
+                let finished = !job.is_active();
+                let succeeded = job.status == InstallJobStatus::Succeeded;
+                match self.jobs.iter_mut().find(|j| j.id == job.id) {
+                    Some(existing) => *existing = job.clone(),
+                    None => self.jobs.push(job.clone()),
+                }
+                if finished {
+                    self.schedule_refresh(cx);
+                    if let Some(error) = job.error.clone().filter(|_| !succeeded) {
+                        self.notice = Some(Notice {
+                            title: format!("Couldn't finish \u{201c}{}\u{201d}", job.title).into(),
+                            body: error.into(),
+                            is_error: true,
+                        });
+                    }
+                    // Let a finished job linger briefly so the bar reaches 100%.
+                    let id = job.id.clone();
+                    cx.spawn(async move |this, cx| {
+                        cx.background_executor().timer(Duration::from_secs(4)).await;
+                        let _ = this.update(cx, |this, cx| {
+                            this.jobs.retain(|j| j.id != id || j.is_active());
+                            cx.notify();
+                        });
+                    })
+                    .detach();
+                }
+            }
+            AppEvent::Log(payload) => {
+                let line = log_line(&payload.event);
+                let buffer = self.logs.entry(payload.instance_id).or_default();
+                buffer.push_back(line);
+                while buffer.len() > LOG_LINES_KEPT {
+                    buffer.pop_front();
+                }
+            }
+            AppEvent::Warning(payload) => {
+                self.notice = Some(Notice {
+                    title: "Heads up".into(),
+                    body: payload.message.into(),
+                    is_error: false,
+                });
+            }
+            _ => {}
+        }
+    }
+
+    /// Coalesce bursts of change events into one refresh.
+    fn schedule_refresh(&mut self, cx: &mut Context<Self>) {
+        if self.status != BackendStatus::Ready {
+            return;
+        }
+        self.refresh_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(150))
+                .await;
+            let _ = this.update(cx, |this, cx| this.refresh_all(cx));
+        }));
+    }
+
+    pub fn refresh_all(&mut self, cx: &mut Context<Self>) {
+        let backend = Backend::global(cx).clone();
+        let fetch = backend.call(async {
+            let instances = theseus::instance::list().await?;
+            let groups = theseus::instance::list_groups().await?;
+            let users = theseus::minecraft_auth::users().await?;
+            let default = theseus::minecraft_auth::get_default_user().await?;
+            let processes = theseus::process::get_all().await?;
+            let mut accounts = Vec::with_capacity(users.len());
+            for user in users {
+                let profile = user.maybe_online_profile().await;
+                accounts.push(Account {
+                    id: profile.id,
+                    name: profile.name.clone().into(),
+                });
+            }
+            Ok((instances, groups, accounts, default, processes))
+        });
+        cx.spawn(async move |this, cx| match fetch.await {
+            Ok((instances, groups, accounts, default, processes)) => {
+                let _ = this.update(cx, |this, cx| {
+                    let mut list: Vec<InstanceInfo> = instances
+                        .into_iter()
+                        .map(InstanceInfo::from_metadata)
+                        .collect();
+                    list.sort_by(|a, b| {
+                        b.last_played
+                            .unwrap_or(b.created)
+                            .cmp(&a.last_played.unwrap_or(a.created))
+                    });
+                    this.instances = list;
+                    this.groups = groups.into_iter().map(|g| (g.id, g.name.into())).collect();
+                    this.accounts = accounts;
+                    this.default_account = default;
+                    for p in processes {
+                        this.running.entry(p.instance_id).or_insert(Running {
+                            started: p.start_time,
+                        });
+                    }
+                    cx.notify();
+                });
+            }
+            Err(error) => tracing::warn!("refreshing state failed: {error:#}"),
+        })
+        .detach();
+    }
+
+    pub fn instance(&self, id: &str) -> Option<&InstanceInfo> {
+        self.instances.iter().find(|i| i.id == id)
+    }
+
+    pub fn job_for(&self, instance_id: &str) -> Option<&Job> {
+        self.jobs
+            .iter()
+            .find(|j| j.is_active() && j.instance_id.as_deref() == Some(instance_id))
+    }
+
+    pub fn active_account(&self) -> Option<&Account> {
+        self.default_account
+            .and_then(|id| self.accounts.iter().find(|a| a.id == id))
+            .or_else(|| self.accounts.first())
+    }
+
+    pub fn notify_error(&mut self, title: impl Into<SharedString>, error: impl std::fmt::Display) {
+        self.notice = Some(Notice {
+            title: title.into(),
+            body: error.to_string().into(),
+            is_error: true,
+        });
+    }
+
+    // ------------------------------------------------------------ actions
+
+    /// Launch an instance. If nobody is signed in yet, say so instead.
+    pub fn play(&mut self, instance_id: &str, cx: &mut Context<Self>) {
+        if self.accounts.is_empty() {
+            self.notice = Some(Notice {
+                title: "Sign in to play".into(),
+                body: "Add your Microsoft account from the bottom of the sidebar, then press Play again.".into(),
+                is_error: false,
+            });
+            cx.notify();
+            return;
+        }
+        let id = instance_id.to_string();
+        let run = Backend::global(cx).call(async move {
+            theseus::instance::run(&id, theseus::instance::QuickPlayType::None).await
+        });
+        cx.spawn(async move |this, cx| {
+            if let Err(error) = run.await {
+                let _ = this.update(cx, |this, cx| {
+                    this.notify_error("Minecraft didn't start", format!("{error:#}"));
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+    }
+
+    pub fn stop(&mut self, instance_id: &str, cx: &mut Context<Self>) {
+        let id = instance_id.to_string();
+        let kill = Backend::global(cx).call(async move { theseus::instance::kill(&id).await });
+        cx.spawn(async move |this, cx| {
+            if let Err(error) = kill.await {
+                let _ = this.update(cx, |this, cx| {
+                    this.notify_error("Couldn't stop the game", format!("{error:#}"));
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+    }
+
+    pub fn create_instance(
+        &mut self,
+        name: String,
+        loader: ModLoader,
+        game_version: String,
+        loader_version: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let create = Backend::global(cx).call(async move {
+            theseus::install::create_instance(
+                name,
+                game_version,
+                loader,
+                loader_version,
+                None,
+                None,
+                theseus::data::InstanceLink::Unmanaged,
+            )
+            .await
+        });
+        cx.spawn(async move |this, cx| {
+            let result = create.await;
+            let _ = this.update(cx, |this, cx| {
+                match result {
+                    Ok(snapshot) => this.handle_event(AppEvent::InstallJob(snapshot.into()), cx),
+                    Err(error) => {
+                        this.notify_error("Couldn't create the instance", format!("{error:#}"))
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    pub fn install_modpack(
+        &mut self,
+        project_id: String,
+        version_id: String,
+        title: String,
+        icon_url: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let install = Backend::global(cx).call(async move {
+            theseus::install::create_modpack_instance(
+                theseus::pack::install_from::CreatePackLocation::FromVersionId {
+                    project_id,
+                    version_id,
+                    title,
+                    icon_url,
+                },
+                None,
+            )
+            .await
+        });
+        cx.spawn(async move |this, cx| {
+            let result = install.await;
+            let _ = this.update(cx, |this, cx| {
+                match result {
+                    Ok(snapshot) => this.handle_event(AppEvent::InstallJob(snapshot.into()), cx),
+                    Err(error) => {
+                        this.notify_error("Couldn't install the modpack", format!("{error:#}"))
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    pub fn set_default_account(&mut self, id: uuid::Uuid, cx: &mut Context<Self>) {
+        self.default_account = Some(id);
+        cx.notify();
+        let set = Backend::global(cx)
+            .call(async move { theseus::minecraft_auth::set_default_user(id).await });
+        cx.spawn(async move |this, cx| {
+            if let Err(error) = set.await {
+                let _ = this.update(cx, |this, cx| {
+                    this.notify_error("Couldn't switch accounts", error);
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+    }
+
+    pub fn remove_account(&mut self, id: uuid::Uuid, cx: &mut Context<Self>) {
+        let remove =
+            Backend::global(cx).call(async move { theseus::minecraft_auth::remove_user(id).await });
+        cx.spawn(async move |this, cx| {
+            let result = remove.await;
+            let _ = this.update(cx, |this, cx| {
+                if let Err(error) = result {
+                    this.notify_error("Couldn't remove the account", error);
+                }
+                this.refresh_all(cx);
+            });
+        })
+        .detach();
+    }
+
+    pub fn dismiss_notice(&mut self, cx: &mut Context<Self>) {
+        self.notice = None;
+        cx.notify();
+    }
+}
+
+fn log_line(event: &theseus::event::LogEvent) -> LogLine {
+    match event {
+        theseus::event::LogEvent::Log4j(e) => {
+            let level = match e
+                .level
+                .as_deref()
+                .unwrap_or("")
+                .to_ascii_uppercase()
+                .as_str()
+            {
+                "WARN" | "WARNING" => LogLevel::Warn,
+                "ERROR" | "FATAL" => LogLevel::Error,
+                "DEBUG" | "TRACE" => LogLevel::Debug,
+                _ => LogLevel::Info,
+            };
+            let time = e
+                .timestamp_millis
+                .and_then(DateTime::<Utc>::from_timestamp_millis)
+                .map(|t| {
+                    t.with_timezone(&chrono::Local)
+                        .format("%H:%M:%S")
+                        .to_string()
+                })
+                .unwrap_or_default();
+            let mut text = e.message.clone().unwrap_or_default();
+            if let Some(thread) = e.thread_name.as_deref()
+                && !thread.is_empty()
+                && thread != "Render thread"
+                && thread != "main"
+            {
+                text = format!("[{thread}] {text}");
+            }
+            if let Some(first) = e.throwable.as_deref().and_then(|t| t.lines().next()) {
+                text = format!("{text} — {first}");
+            }
+            LogLine {
+                time: time.into(),
+                level,
+                text: text.into(),
+            }
+        }
+        theseus::event::LogEvent::Legacy { message } => parse_legacy_line(message),
+    }
+}
+
+/// Plain-text lines look like `[14:02:11] [Render thread/WARN]: message`.
+pub fn parse_legacy_line(message: &str) -> LogLine {
+    let mut time = String::new();
+    let mut level = LogLevel::Info;
+    let mut text = message.trim_end().to_string();
+    if let Some(rest) = text.strip_prefix('[')
+        && let Some((t, rest)) = rest.split_once("] [")
+        && let Some((thread_level, msg)) = rest.split_once("]: ")
+    {
+        time = t.to_string();
+        let lvl = thread_level.rsplit('/').next().unwrap_or("");
+        level = match lvl {
+            "WARN" => LogLevel::Warn,
+            "ERROR" | "FATAL" => LogLevel::Error,
+            "DEBUG" | "TRACE" => LogLevel::Debug,
+            _ => LogLevel::Info,
+        };
+        text = msg.to_string();
+    } else if text.contains("Exception") || text.starts_with("\tat ") {
+        level = LogLevel::Error;
+    }
+    LogLine {
+        time: time.into(),
+        level,
+        text: text.into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legacy_lines_are_parsed() {
+        let line = parse_legacy_line("[14:02:14] [Render thread/WARN]: Missing sound for event");
+        assert_eq!(line.time.as_ref(), "14:02:14");
+        assert_eq!(line.level, LogLevel::Warn);
+        assert_eq!(line.text.as_ref(), "Missing sound for event");
+
+        let plain = parse_legacy_line("java.lang.IllegalStateException: boom");
+        assert_eq!(plain.level, LogLevel::Error);
+        assert_eq!(plain.time.as_ref(), "");
+    }
+
+    #[test]
+    fn phases_have_friendly_names() {
+        assert_eq!(
+            phase_label("downloading_minecraft"),
+            "Downloading Minecraft"
+        );
+        assert_eq!(phase_label("something_new"), "Working");
+    }
+}

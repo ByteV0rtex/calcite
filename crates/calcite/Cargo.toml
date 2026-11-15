@@ -34,4 +34,5 @@ url.workspace = true
 uuid.workspace = true
 chrono.workspace = true
 calcite-core = { path = "../calcite-core" }
+minecraft-meta-manifest = { path = "../../vendor/modrinth/packages/minecraft-meta-manifest" }
 theseus = { path = "../../vendor/modrinth/packages/app-lib", features = ["native-events"] }

@@ -3,15 +3,20 @@
 
 mod assets;
 mod backend;
+mod cli;
 mod images;
+mod login;
+mod state;
 mod theme;
 mod ui;
+mod versions;
 
 use gpui_kit::component::{Root, TitleBar};
 use gpui_kit::prelude::*;
 use gpui_kit::{App, Bounds, WindowBounds, WindowOptions, px, size};
 
 use crate::backend::Backend;
+use crate::state::AppState;
 use crate::theme::{Accent, Appearance};
 use crate::ui::pages::discover::Api;
 use crate::ui::shell::{Route, Shell};
@@ -25,14 +30,12 @@ fn main() {
         .init();
 
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let route_arg = |name: &str| match name {
-        "gallery" => Route::Gallery,
-        "library" => Route::Library,
-        "discover" => Route::Discover,
-        "instance" => Route::Instance("fo"),
-        "instance-logs" | "instance-health" => Route::Instance("cobblemon"),
-        _ => Route::Home,
-    };
+
+    // Command-line mode: `calcite list`, `calcite create …`, `calcite play …`.
+    if let Some(code) = cli::run(&args) {
+        std::process::exit(code);
+    }
+
     // `--snapshot <page> <out.png> [light|oled]` (dev builds with the `snapshot` feature).
     let snapshot = match args.first().map(String::as_str) {
         Some("--snapshot") => Some((
@@ -42,11 +45,15 @@ fn main() {
         )),
         _ => None,
     };
-    let start = match (&snapshot, args.first().map(String::as_str)) {
-        (Some((page, _, _)), _) => route_arg(page),
-        (None, Some(flag)) if flag.starts_with("--") => route_arg(&flag[2..]),
-        _ => Route::Home,
-    };
+    let page_arg = snapshot
+        .as_ref()
+        .map(|s| s.0.clone())
+        .or_else(|| {
+            args.first()
+                .and_then(|a| a.strip_prefix("--"))
+                .map(str::to_string)
+        })
+        .unwrap_or_default();
 
     let (backend, events) = match Backend::start() {
         Ok(started) => started,
@@ -75,30 +82,7 @@ fn main() {
             images::Images::init(api.clone(), cx);
             cx.set_global(Api(api));
             cx.set_global(backend.clone());
-
-            // Bring the launcher backend up in the background; the window
-            // opens immediately and never waits on disk or network.
-            let started = std::time::Instant::now();
-            let init = backend.init_state();
-            cx.spawn(async move |_cx| match init.await {
-                Ok(()) => tracing::info!(
-                    "backend ready in {:?} (data folder: {})",
-                    started.elapsed(),
-                    backend::data_id()
-                ),
-                Err(error) => tracing::error!("backend failed to start: {error:#}"),
-            })
-            .detach();
-
-            // Drain backend events. Milestone 2 routes these into app state.
-            cx.spawn(async move |_cx| {
-                use futures::StreamExt as _;
-                let mut events = events;
-                while let Some(event) = events.next().await {
-                    tracing::debug!("backend event: {}", event_name(&event));
-                }
-            })
-            .detach();
+            AppState::start(events, cx);
 
             let bounds = Bounds::centered(None, size(px(1280.0), px(820.0)), cx);
             let options = WindowOptions {
@@ -112,42 +96,70 @@ fn main() {
                 }),
                 ..TitleBar::window_options()
             };
-            let page = snapshot.as_ref().map(|s| s.0.clone()).unwrap_or_default();
             let window = cx
                 .open_window(options, |window, cx| {
                     window.set_window_title("Calcite");
-                    let shell = cx.new(|cx| {
-                        let mut shell = Shell::new(start.clone(), window, cx);
-                        if page == "instance-logs" {
-                            shell.set_instance_tab(ui::pages::instance::Tab::Logs, cx);
-                        } else if page == "instance-health" {
-                            shell.set_instance_tab(ui::pages::instance::Tab::Health, cx);
-                        }
-                        shell
-                    });
+                    let start = match page_arg.as_str() {
+                        "gallery" => Route::Gallery,
+                        "library" => Route::Library,
+                        "discover" => Route::Discover,
+                        _ => Route::Home,
+                    };
+                    let shell = cx.new(|cx| Shell::new(start, window, cx));
                     cx.new(|cx| Root::new(shell, window, cx))
                 })
                 .expect("open the main window");
             cx.activate(true);
 
-            if let Some((_, out, _)) = snapshot.clone() {
-                take_snapshot(window.into(), out, cx);
+            if let Some((page, out, _)) = snapshot.clone() {
+                take_snapshot(window.into(), page, out, cx);
             }
         });
 }
 
-/// Wait for network images to arrive, render the window offscreen, save it.
+/// Wait for data and images to arrive, render the window offscreen, save it.
+/// Pages: home, library, discover, gallery, instance, instance-logs, create.
 #[cfg(feature = "snapshot")]
-fn take_snapshot(window: gpui_kit::AnyWindowHandle, out: String, cx: &mut App) {
+fn take_snapshot(window: gpui_kit::AnyWindowHandle, page: String, out: String, cx: &mut App) {
     cx.spawn(async move |cx| {
-        cx.background_executor()
-            .timer(std::time::Duration::from_secs(5))
-            .await;
-        let _ = cx.update_window(window, |_, window, _| window.refresh());
-        cx.background_executor()
-            .timer(std::time::Duration::from_millis(400))
-            .await;
-        let result = cx.update_window(window, |_, window, _| window.render_to_image());
+        let executor = cx.background_executor().clone();
+        let wait = |ms| executor.timer(std::time::Duration::from_millis(ms));
+        wait(2500).await;
+        // Pages that need app state are opened once the backend is ready.
+        let _ = cx.update_window(window, |root, window, cx| {
+            let Ok(root) = root.downcast::<Root>() else {
+                return;
+            };
+            let Some(shell) = root.read(cx).view().clone().downcast::<Shell>().ok() else {
+                return;
+            };
+            shell.update(cx, |shell, cx| {
+                let first = AppState::global(cx)
+                    .read(cx)
+                    .instances
+                    .first()
+                    .map(|i| i.id.clone());
+                match (page.as_str(), first) {
+                    ("instance" | "instance-logs", Some(id)) => {
+                        shell.navigate(Route::Instance(id), window, cx);
+                        if page == "instance-logs" {
+                            shell.with_instance_page(cx, |p, cx| {
+                                p.set_tab(ui::pages::instance::Tab::Logs, cx)
+                            });
+                        }
+                    }
+                    ("create", _) => shell.open_create_dialog(window, cx),
+                    _ => {}
+                }
+            });
+        });
+        wait(3500).await;
+        // Draw explicitly: macOS pauses drawing for windows hidden behind others.
+        let result = cx.update_window(window, |_, window, cx| {
+            window.refresh();
+            window.draw(cx).clear(cx);
+            window.render_to_image()
+        });
         match result {
             Ok(Ok(image)) => match image.save(&out) {
                 Ok(()) => println!("snapshot saved to {out}"),
@@ -161,24 +173,6 @@ fn take_snapshot(window: gpui_kit::AnyWindowHandle, out: String, cx: &mut App) {
 }
 
 #[cfg(not(feature = "snapshot"))]
-fn take_snapshot(_window: gpui_kit::AnyWindowHandle, _out: String, _cx: &mut App) {
+fn take_snapshot(_window: gpui_kit::AnyWindowHandle, _page: String, _out: String, _cx: &mut App) {
     eprintln!("This build can't take snapshots; rebuild with `--features snapshot`.");
-}
-
-fn event_name(event: &theseus::AppEvent) -> &'static str {
-    use theseus::AppEvent::*;
-    match event {
-        Loading(_) => "loading",
-        Process(_) => "process",
-        Instance(_) => "instance",
-        InstanceGroupsChanged(_) => "instance-groups",
-        OnboardingChecklist(_) => "onboarding",
-        InstallJob(_) => "install-job",
-        Command(_) => "command",
-        Warning(_) => "warning",
-        Friend(_) => "friend",
-        Notification(_) => "notification",
-        Log(_) => "log",
-        AdsConsentRequired(_) => "ads-consent",
-    }
 }

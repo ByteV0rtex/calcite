@@ -3,23 +3,76 @@
 use gpui_kit::prelude::*;
 use gpui_kit::{AnyElement, ClickEvent, Context, FontWeight, SharedString, Window, div, px};
 
-use crate::images::Images;
 use crate::theme::{PaletteExt, radius, space, type_scale};
-use crate::ui::components::{Button, chip, icon, section_heading, short_duration, thumb};
-use crate::ui::sample;
-use crate::ui::shell::{Route, Shell};
+use crate::ui::components::{
+    Button, empty_state, relative_time, section_heading, short_duration, thumb,
+};
+use crate::ui::shell::{Route, Shell, instance_icon};
 
-pub fn render(_shell: &mut Shell, _window: &mut Window, cx: &mut Context<Shell>) -> AnyElement {
+pub fn render(shell: &mut Shell, _window: &mut Window, cx: &mut Context<Shell>) -> AnyElement {
     let p = cx.palette().clone();
+    let state = shell.state().read(cx);
+    let instances = state.instances.clone();
+    let running = state.running.clone();
+    let accounts = state.accounts.len();
+
+    if instances.is_empty() {
+        return div()
+            .size_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(empty_state(
+                "house",
+                "Welcome to Calcite",
+                if accounts == 0 {
+                    "Sign in with your Microsoft account (bottom left), then install a modpack or make your own instance."
+                } else {
+                    "Install a modpack from Discover or make your own instance to get started."
+                },
+                Some(
+                    div()
+                        .flex()
+                        .gap(space(2.0))
+                        .child(
+                            Button::new("home-discover")
+                                .icon("compass")
+                                .label("Browse modpacks")
+                                .primary()
+                                .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                                    this.navigate(Route::Discover, window, cx)
+                                })),
+                        )
+                        .child(
+                            Button::new("home-new")
+                                .icon("plus")
+                                .label("New instance")
+                                .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                                    this.open_create_dialog(window, cx)
+                                })),
+                        )
+                        .into_any_element(),
+                ),
+                cx,
+            ))
+            .into_any_element();
+    }
 
     let mut jump = div().flex().gap(space(3.0));
-    for inst in sample::INSTANCES.iter().take(3) {
-        let source = inst.icon.and_then(|url| Images::get(url, 96, cx));
-        let id = inst.id;
+    for inst in instances.iter().take(3) {
+        let source = instance_icon(inst);
+        let id = inst.id.clone();
+        let play_id = inst.id.clone();
+        let is_running = running.contains_key(&inst.id);
+        let detail = match inst.last_played {
+            Some(t) => format!("{} · {}", inst.loader_line(), relative_time(t)),
+            None => inst.loader_line(),
+        };
         jump = jump.child(
             div()
                 .id(SharedString::from(format!("jump-{id}")))
                 .flex_1()
+                .min_w_0()
                 .flex()
                 .items_center()
                 .gap(space(3.0))
@@ -30,10 +83,10 @@ pub fn render(_shell: &mut Shell, _window: &mut Window, cx: &mut Context<Shell>)
                 .border_color(p.border)
                 .cursor_pointer()
                 .hover(|s| s.border_color(p.border_strong))
-                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                    this.navigate(Route::Instance(id), cx)
+                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                    this.navigate(Route::Instance(id.clone()), window, cx)
                 }))
-                .child(thumb(source, inst.name, 44.0, radius::MD, cx))
+                .child(thumb(source, &inst.name, 44.0, radius::MD, cx))
                 .child(
                     div()
                         .flex()
@@ -47,97 +100,44 @@ pub fn render(_shell: &mut Shell, _window: &mut Window, cx: &mut Context<Shell>)
                                 .text_size(px(type_scale::BODY))
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .text_color(p.text)
-                                .child(inst.name),
+                                .child(inst.name.clone()),
                         )
                         .child(
                             div()
+                                .truncate()
                                 .text_size(px(type_scale::SMALL))
                                 .text_color(p.text_muted)
-                                .child(format!(
-                                    "{} {} · {}",
-                                    inst.loader, inst.game_version, inst.last_played
-                                )),
+                                .child(detail),
                         ),
                 )
-                .child(
-                    Button::new(SharedString::from(format!("jump-play-{id}")))
+                .child(if is_running {
+                    Button::new(SharedString::from(format!("jump-stop-{play_id}")))
+                        .icon("square")
+                        .danger()
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                            cx.stop_propagation();
+                            let id = play_id.clone();
+                            this.state().update(cx, |s, cx| s.stop(&id, cx));
+                        }))
+                } else {
+                    Button::new(SharedString::from(format!("jump-play-{play_id}")))
                         .icon("play")
-                        .primary(),
-                ),
+                        .primary()
+                        .disabled(!inst.installed)
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                            cx.stop_propagation();
+                            let id = play_id.clone();
+                            this.state().update(cx, |s, cx| s.play(&id, cx));
+                        }))
+                }),
         );
     }
 
-    let worlds: &[(&str, &str, &str)] = &[
-        (
-            "New Horizons",
-            "Survival · Fabulously Optimized",
-            "2 hours ago",
-        ),
-        ("Brass Factory", "Creative · Create Survival", "Now"),
-        ("play.example.net", "Server · PvP Practice", "3 days ago"),
-    ];
-    let mut world_list = crate::ui::components::panel(cx).overflow_hidden();
-    for (ix, (name, detail, when)) in worlds.iter().enumerate() {
-        let is_server = detail.starts_with("Server");
-        world_list = world_list.child(
-            div()
-                .id(SharedString::from(format!("world-{ix}")))
-                .flex()
-                .items_center()
-                .gap(space(3.0))
-                .h(px(52.0))
-                .px(space(3.5))
-                .when(ix > 0, |d| d.border_t_1().border_color(p.border))
-                .hover(|s| s.bg(p.hover))
-                .cursor_pointer()
-                .child(
-                    div()
-                        .size(px(32.0))
-                        .rounded(px(radius::SM))
-                        .bg(p.raised)
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .child(icon(
-                            if is_server { "server" } else { "globe" },
-                            16.0,
-                            p.text_muted,
-                        )),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .flex_1()
-                        .child(
-                            div()
-                                .text_size(px(type_scale::BODY))
-                                .font_weight(FontWeight::MEDIUM)
-                                .text_color(p.text)
-                                .child(*name),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(type_scale::SMALL))
-                                .text_color(p.text_muted)
-                                .child(*detail),
-                        ),
-                )
-                .child(
-                    div()
-                        .text_size(px(type_scale::SMALL))
-                        .text_color(p.text_muted)
-                        .child(*when),
-                )
-                .child(
-                    Button::new(SharedString::from(format!("world-join-{ix}")))
-                        .label("Join")
-                        .small(),
-                ),
-        );
-    }
-
-    let total: u64 = sample::INSTANCES.iter().map(|i| i.played_secs).sum();
+    let total: u64 = instances.iter().map(|i| i.played_secs).sum();
+    let modded = instances
+        .iter()
+        .filter(|i| i.loader != theseus::data::ModLoader::Vanilla)
+        .count();
     let stat = |label: &'static str, value: String| {
         div()
             .flex()
@@ -188,25 +188,17 @@ pub fn render(_shell: &mut Shell, _window: &mut Window, cx: &mut Context<Shell>)
                     div()
                         .flex()
                         .gap(space(3.0))
-                        .child(stat("Played this week", short_duration(9 * 3600 + 40 * 60)))
-                        .child(stat("All-time playtime", short_duration(total)))
-                        .child(stat("Updates waiting", "3".into()))
-                        .child(stat("Disk saved by sharing files", "4.2 GB".into())),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(space(3.0))
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .justify_between()
-                                .child(section_heading("Continue in a world", cx))
-                                .child(chip("Quick Play", cx)),
-                        )
-                        .child(world_list),
+                        .child(stat(
+                            "Total playtime",
+                            if total > 0 {
+                                short_duration(total)
+                            } else {
+                                "—".into()
+                            },
+                        ))
+                        .child(stat("Instances", instances.len().to_string()))
+                        .child(stat("Modded", modded.to_string()))
+                        .child(stat("Running now", running.len().to_string())),
                 ),
         )
         .into_any_element()

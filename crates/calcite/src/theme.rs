@@ -365,6 +365,7 @@ pub mod radius {
     pub const SM: f32 = 6.0;
     pub const MD: f32 = 8.0;
     pub const LG: f32 = 10.0;
+    pub const XL: f32 = 14.0;
 }
 
 /// 4px spacing grid.

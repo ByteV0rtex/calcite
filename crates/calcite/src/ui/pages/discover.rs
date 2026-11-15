@@ -12,6 +12,7 @@ use gpui_kit::{
 
 use crate::backend::Backend;
 use crate::images::Images;
+use crate::state::AppState;
 use crate::theme::{PaletteExt, radius, space, type_scale};
 use crate::ui::components::{Button, chip, compact_number, empty_state, icon, skeleton, thumb};
 use crate::ui::pages::page_header;
@@ -25,6 +26,8 @@ pub struct DiscoverPage {
     input: Entity<InputState>,
     results: Option<Result<SearchResults, String>>,
     loading: bool,
+    /// Modpacks the user started installing from this page.
+    started: std::collections::HashSet<String>,
     pending: Option<Task<()>>,
     _subscription: Subscription,
 }
@@ -44,6 +47,7 @@ impl DiscoverPage {
             input,
             results: None,
             loading: false,
+            started: Default::default(),
             pending: None,
             _subscription: subscription,
         };
@@ -176,11 +180,17 @@ impl DiscoverPage {
                 tags = tags.child(chip(title_case(cat), cx));
             }
         }
-        let action_label = if self.query.project_type == ProjectType::Modpack {
-            "Install"
-        } else {
-            "Add to…"
-        };
+        // Modpacks install as a new instance. Adding mods to an existing
+        // instance arrives with the instance picker in the next milestone.
+        let installable =
+            self.query.project_type == ProjectType::Modpack && hit.latest_version.is_some();
+        let started = self.started.contains(&hit.project_id);
+        let install = (
+            hit.project_id.clone(),
+            hit.latest_version.clone(),
+            hit.title.clone(),
+            hit.icon_url.clone(),
+        );
 
         div()
             .id(ix)
@@ -264,12 +274,30 @@ impl DiscoverPage {
                                     .child(compact_number(hit.follows)),
                             ),
                     )
-                    .child(
-                        Button::new(SharedString::from(format!("install-{}", hit.project_id)))
-                            .icon("arrow-down-to-line")
-                            .label(action_label)
-                            .small(),
-                    ),
+                    .when(installable, |d| {
+                        d.child(
+                            Button::new(SharedString::from(format!("install-{}", hit.project_id)))
+                                .icon(if started {
+                                    "check"
+                                } else {
+                                    "arrow-down-to-line"
+                                })
+                                .label(if started { "Installing" } else { "Install" })
+                                .disabled(started)
+                                .small()
+                                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                    let (project_id, version, title, icon_url) = install.clone();
+                                    let Some(version_id) = version else { return };
+                                    this.started.insert(project_id.clone());
+                                    AppState::global(cx).update(cx, |state, cx| {
+                                        state.install_modpack(
+                                            project_id, version_id, title, icon_url, cx,
+                                        )
+                                    });
+                                    cx.notify();
+                                })),
+                        )
+                    }),
             )
     }
 }

@@ -480,6 +480,36 @@ pub fn short_duration(seconds: u64) -> String {
     }
 }
 
+/// "just now", "12 minutes ago", "yesterday", "3 days ago", "Mar 4".
+pub fn relative_time(when: chrono::DateTime<chrono::Utc>) -> String {
+    relative_time_from(when, chrono::Utc::now())
+}
+
+fn relative_time_from(
+    when: chrono::DateTime<chrono::Utc>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> String {
+    let secs = (now - when).num_seconds().max(0);
+    let mins = secs / 60;
+    let hours = mins / 60;
+    let days = hours / 24;
+    match (mins, hours, days) {
+        (0, _, _) => "just now".into(),
+        (1, _, _) => "a minute ago".into(),
+        (m, 0, _) => format!("{m} minutes ago"),
+        (_, 1, _) => "an hour ago".into(),
+        (_, h, 0) => format!("{h} hours ago"),
+        (_, _, 1) => "yesterday".into(),
+        (_, _, d) if d < 7 => format!("{d} days ago"),
+        (_, _, d) if d < 14 => "last week".into(),
+        (_, _, d) if d < 30 => format!("{} weeks ago", d / 7),
+        _ => when
+            .with_timezone(&chrono::Local)
+            .format("%b %-d, %Y")
+            .to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -500,6 +530,37 @@ mod tests {
         assert_eq!(short_duration(45 * 60), "45m");
         assert_eq!(short_duration(3 * 3600), "3h");
         assert_eq!(short_duration(3 * 3600 + 12 * 60), "3h 12m");
+    }
+
+    #[test]
+    fn relative_times_read_naturally() {
+        use chrono::{Duration, TimeZone, Utc};
+        let now = Utc.with_ymd_and_hms(2026, 11, 15, 12, 0, 0).unwrap();
+        assert_eq!(relative_time_from(now, now), "just now");
+        assert_eq!(
+            relative_time_from(now - Duration::minutes(12), now),
+            "12 minutes ago"
+        );
+        assert_eq!(
+            relative_time_from(now - Duration::hours(3), now),
+            "3 hours ago"
+        );
+        assert_eq!(
+            relative_time_from(now - Duration::hours(30), now),
+            "yesterday"
+        );
+        assert_eq!(
+            relative_time_from(now - Duration::days(4), now),
+            "4 days ago"
+        );
+        assert_eq!(
+            relative_time_from(now - Duration::days(9), now),
+            "last week"
+        );
+        assert_eq!(
+            relative_time_from(now - Duration::days(20), now),
+            "2 weeks ago"
+        );
     }
 
     #[test]
