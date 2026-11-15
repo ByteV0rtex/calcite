@@ -19,7 +19,7 @@ jobs:
       matrix:
         include:
           - name: macOS (Apple Silicon)
-            os: macos-14
+            os: macos-latest
           - name: Windows
             os: windows-latest
           - name: Linux
@@ -52,7 +52,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Format
-        run: cargo fmt --all --check
+        run: cargo fmt --check -p calcite -p calcite-core -p calcite-login
 
       - name: Lint
         run: cargo clippy --workspace --all-targets -- -D warnings

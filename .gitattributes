@@ -1,0 +1,3 @@
+# Patches and scripts must keep LF line endings on every OS.
+*.patch -text
+*.sh text eol=lf

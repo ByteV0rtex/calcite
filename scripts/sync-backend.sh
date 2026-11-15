@@ -23,7 +23,7 @@ if [[ -d "$VENDOR/.git" ]]; then
 fi
 
 if [[ ! -d "$VENDOR/.git" ]]; then
-  git clone --quiet --depth 1 --branch "$TAG" "$REPO" "$VENDOR"
+  git -c core.autocrlf=false clone --quiet --depth 1 --branch "$TAG" "$REPO" "$VENDOR"
 fi
 
 cd "$VENDOR"
@@ -33,7 +33,7 @@ git reset --quiet --hard HEAD
 for patch in "$ROOT"/patches/*.patch; do
   [[ -e "$patch" ]] || continue
   echo "==> Applying $(basename "$patch")"
-  git apply --whitespace=nowarn "$patch"
+  git apply --whitespace=nowarn --ignore-whitespace "$patch"
 done
 
 # app-lib's build script reads compile-time URLs from .env.
