@@ -59,7 +59,21 @@ enum Editing {
     },
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SortBy {
+    Name,
+    Size,
+    Modified,
+}
+
 pub struct FilesBrowser {
+    /// Filters this folder by name (made on first render: it needs the window).
+    filter: Option<Entity<InputState>>,
+    sort: SortBy,
+    descending: bool,
+    /// "New file" asked for; the name box opens on the next render.
+    pending_file: bool,
+    new_file: Option<Entity<InputState>>,
     instance_id: String,
     dir: String,
     items: Option<Result<Vec<InstanceFileItem>, String>>,
@@ -74,6 +88,11 @@ pub struct FilesBrowser {
 impl FilesBrowser {
     pub fn new(instance_id: String, cx: &mut Context<Self>) -> Self {
         let mut browser = FilesBrowser {
+            filter: None,
+            sort: SortBy::Name,
+            descending: false,
+            pending_file: false,
+            new_file: None,
             instance_id,
             dir: String::new(),
             items: None,
@@ -111,6 +130,92 @@ impl FilesBrowser {
             });
         })
         .detach();
+    }
+
+    /// Make an empty text file here and open it.
+    fn finish_new_file(&mut self, cx: &mut Context<Self>) {
+        let Some(input) = self.new_file.take() else {
+            return;
+        };
+        let name = input.read(cx).value().trim().to_string();
+        if name.is_empty() || name.contains('/') || name.contains('\\') {
+            cx.notify();
+            return;
+        }
+        let path = if self.dir.is_empty() {
+            name
+        } else {
+            format!("{}/{name}", self.dir)
+        };
+        let id = self.instance_id.clone();
+        let target = path.clone();
+        let task = Backend::global(cx).call(async move {
+            theseus::instance::write_instance_file(&id, &target, b"", true).await
+        });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| match result {
+                Ok(_) => {
+                    this.load(cx);
+                    this.open(path, false, true, cx);
+                }
+                Err(error) => this.fail("Couldn't make that file", error, cx),
+            });
+        })
+        .detach();
+    }
+
+    /// Copy files from the computer into this folder.
+    fn add_files(&mut self, cx: &mut Context<Self>) {
+        let picked = cx.prompt_for_paths(gpui_kit::PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: true,
+            prompt: Some("Add here".into()),
+        });
+        let (id, dir) = (self.instance_id.clone(), self.dir.clone());
+        let backend = Backend::global(cx).clone();
+        cx.spawn(async move |this, cx| {
+            let Ok(Ok(Some(paths))) = picked.await else {
+                return;
+            };
+            let root = backend
+                .call(async move { theseus::instance::get_full_path(&id).await })
+                .await;
+            let result = match root {
+                Ok(root) => {
+                    let target = root.join(&dir);
+                    cx.background_spawn(async move {
+                        for path in paths {
+                            if let Some(name) = path.file_name() {
+                                std::fs::copy(&path, target.join(name))?;
+                            }
+                        }
+                        anyhow::Ok(())
+                    })
+                    .await
+                }
+                Err(error) => Err(error),
+            };
+            let _ = this.update(cx, |this, cx| {
+                if let Err(error) = result {
+                    this.fail("Couldn't add those files", error, cx);
+                }
+                this.load(cx);
+            });
+        })
+        .detach();
+    }
+
+    fn sort_by(&mut self, by: SortBy, cx: &mut Context<Self>) {
+        if self.sort == by {
+            self.descending = !self.descending;
+        } else {
+            self.sort = by;
+            // Biggest and newest first is what people look for.
+            self.descending = by != SortBy::Name;
+        }
+        cx.notify();
     }
 
     fn go(&mut self, dir: String, cx: &mut Context<Self>) {
@@ -453,6 +558,37 @@ impl Render for FilesBrowser {
             .detach();
             self.new_folder = Some(input);
         }
+        if self.filter.is_none() {
+            let input = cx.new(|cx| InputState::new(window, cx).placeholder("Filter this folder"));
+            cx.subscribe(
+                &input,
+                |_, _, event: &gpui_kit::component::input::InputEvent, cx| {
+                    if matches!(event, gpui_kit::component::input::InputEvent::Change) {
+                        cx.notify();
+                    }
+                },
+            )
+            .detach();
+            self.filter = Some(input);
+        }
+        if self.pending_file {
+            self.pending_file = false;
+            let input = cx.new(|cx| InputState::new(window, cx).placeholder("notes.txt"));
+            input.update(cx, |s, cx| s.focus(window, cx));
+            cx.subscribe(
+                &input,
+                |this, _, event: &gpui_kit::component::input::InputEvent, cx| {
+                    if matches!(
+                        event,
+                        gpui_kit::component::input::InputEvent::PressEnter { .. }
+                    ) {
+                        this.finish_new_file(cx);
+                    }
+                },
+            )
+            .detach();
+            self.new_file = Some(input);
+        }
         if let Some(editor) = self.editor(cx) {
             return editor;
         }
@@ -466,6 +602,30 @@ impl Render for FilesBrowser {
             .pt(space(4.0))
             .pb(space(2.0))
             .child(div().flex_1().min_w_0().child(self.crumbs(cx)))
+            .children(self.filter.as_ref().map(|f| {
+                div()
+                    .w(px(180.0))
+                    .child(Input::new(f).small().cleanable(true))
+            }))
+            .child(
+                Button::new("files-add")
+                    .icon("arrow-down-to-line")
+                    .label("Add files…")
+                    .ghost()
+                    .small()
+                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.add_files(cx))),
+            )
+            .child(
+                Button::new("files-new-file")
+                    .icon("file-text")
+                    .label("New file")
+                    .ghost()
+                    .small()
+                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                        this.pending_file = true;
+                        cx.notify();
+                    })),
+            )
             .child(
                 Button::new("files-new-folder")
                     .icon("plus")
@@ -512,12 +672,115 @@ impl Render for FilesBrowser {
                 cx,
             )
             .into_any_element(),
-            Some(Ok(items)) if items.is_empty() && self.new_folder.is_none() => {
+            Some(Ok(items))
+                if items.is_empty() && self.new_folder.is_none() && self.new_file.is_none() =>
+            {
                 empty_state("folder", "Empty folder", "Nothing in here yet.", None, cx)
                     .into_any_element()
             }
             Some(Ok(items)) => {
-                let mut rows = div().flex().flex_col().px(space(8.0)).pb(space(8.0));
+                let query = self
+                    .filter
+                    .as_ref()
+                    .map(|f| f.read(cx).value().trim().to_lowercase())
+                    .unwrap_or_default();
+                let mut items: Vec<&InstanceFileItem> = items
+                    .iter()
+                    .filter(|i| query.is_empty() || i.name.to_lowercase().contains(&query))
+                    .collect();
+                let (sort, descending) = (self.sort, self.descending);
+                items.sort_by(|a, b| {
+                    let order = match sort {
+                        SortBy::Name => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
+                        SortBy::Size => a
+                            .size
+                            .unwrap_or(a.count.unwrap_or(0) as u64)
+                            .cmp(&b.size.unwrap_or(b.count.unwrap_or(0) as u64)),
+                        SortBy::Modified => a.modified.cmp(&b.modified),
+                    };
+                    (b.kind == "directory")
+                        .cmp(&(a.kind == "directory"))
+                        .then(if descending { order.reverse() } else { order })
+                });
+                let header = |key: &'static str,
+                              label: &'static str,
+                              by: SortBy,
+                              width: Option<f32>,
+                              cx: &mut Context<Self>| {
+                    let active = sort == by;
+                    div()
+                        .id(key)
+                        .flex()
+                        .items_center()
+                        .gap(space(1.0))
+                        .when_some(width, |d, w| d.w(px(w)).justify_end())
+                        .when(width.is_none(), |d| d.flex_1())
+                        .cursor_pointer()
+                        .text_color(if active { p.text } else { p.text_muted })
+                        .hover(|s| s.text_color(p.text))
+                        .on_click(
+                            cx.listener(move |this, _: &ClickEvent, _, cx| this.sort_by(by, cx)),
+                        )
+                        .child(label)
+                        .when(active, |d| {
+                            d.child(icon(
+                                if descending { "arrow-down" } else { "arrow-up" },
+                                11.0,
+                                p.text_muted,
+                            ))
+                        })
+                };
+                let mut rows = div().flex().flex_col().px(space(8.0)).pb(space(8.0)).child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(space(3.0))
+                        .h(px(30.0))
+                        .px(space(3.0))
+                        .border_b_1()
+                        .border_color(p.border)
+                        .text_size(px(type_scale::CAPTION))
+                        .font_weight(gpui_kit::FontWeight::MEDIUM)
+                        .child(div().w(px(16.0)))
+                        .child(header("files-sort-name", "Name", SortBy::Name, None, cx))
+                        .child(header(
+                            "files-sort-size",
+                            "Size",
+                            SortBy::Size,
+                            Some(90.0),
+                            cx,
+                        ))
+                        .child(header(
+                            "files-sort-modified",
+                            "Modified",
+                            SortBy::Modified,
+                            Some(110.0),
+                            cx,
+                        ))
+                        .child(div().w(px(64.0))),
+                );
+                if let Some(input) = &self.new_file {
+                    rows = rows.child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(space(3.0))
+                            .h(px(40.0))
+                            .px(space(3.0))
+                            .border_b_1()
+                            .border_color(p.border)
+                            .child(icon("file-text", 16.0, p.accent))
+                            .child(div().w(px(260.0)).child(Input::new(input).small()))
+                            .child(
+                                Button::new("files-new-file-ok")
+                                    .label("Create")
+                                    .small()
+                                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                        this.finish_new_file(cx)
+                                    })),
+                            ),
+                    );
+                }
                 if let Some(input) = &self.new_folder {
                     rows = rows.child(
                         div()
@@ -540,7 +803,16 @@ impl Render for FilesBrowser {
                             ),
                     );
                 }
-                for (ix, item) in items.iter().enumerate() {
+                if items.is_empty() {
+                    rows = rows.child(
+                        div()
+                            .p(space(4.0))
+                            .text_size(px(type_scale::SMALL))
+                            .text_color(p.text_muted)
+                            .child("Nothing here matches."),
+                    );
+                }
+                for (ix, item) in items.iter().copied().enumerate() {
                     let dir = item.kind == "directory";
                     let detail = if dir {
                         item.count
