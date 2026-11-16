@@ -1,0 +1,24 @@
+diff --git a/packages/app-lib/src/state/discord.rs b/packages/app-lib/src/state/discord.rs
+index f3f78fb..f3a3fd7 100644
+--- a/packages/app-lib/src/state/discord.rs
++++ b/packages/app-lib/src/state/discord.rs
+@@ -18,7 +18,7 @@ impl DiscordGuard {
+     /// Initialize discord IPC client, and attempt to connect to it
+     /// If it fails, it will still return a DiscordGuard, but the client will be unconnected
+     pub fn init() -> crate::Result<DiscordGuard> {
+-        let dipc = DiscordIpcClient::new("1123683254248148992");
++        let dipc = DiscordIpcClient::new("1571927186468773988");
+ 
+         Ok(DiscordGuard {
+             client: Arc::new(RwLock::new(dipc)),
+@@ -73,8 +73,8 @@ impl DiscordGuard {
+ 
+         let activity = Activity::new().state(msg).assets(
+             Assets::new()
+-                .large_image("modrinth_simple")
+-                .large_text("Modrinth Logo"),
++                .large_image("calcite")
++                .large_text("Calcite"),
+         );
+ 
+         // Attempt to set the activity
