@@ -13,8 +13,10 @@ use crate::backend::{self, Backend};
 use crate::images::Images;
 use crate::state::AppState;
 use crate::theme::{PaletteExt, radius, space, type_scale};
-use crate::ui::components::{Button, chip, empty_state, icon, relative_time, skeleton, state_chip};
-use crate::ui::pages::instance::InstancePage;
+use crate::ui::components::{
+    Button, chip, empty_state, icon, icon_chip, relative_time, skeleton, state_chip,
+};
+use crate::ui::pages::instance::{InstancePage, InstancePageEvent};
 
 #[derive(Clone, Debug)]
 pub struct WorldRow {
@@ -25,6 +27,25 @@ pub struct WorldRow {
     pub icon: Option<String>,
     pub server: bool,
     pub detail: SharedString,
+    /// Position in the server list (servers only), for edit and remove.
+    pub index: Option<usize>,
+    /// Resource pack setting as the backend names it (servers only).
+    pub pack: Option<serde_json::Value>,
+}
+
+/// What a server said when pinged.
+#[derive(Clone, Debug)]
+pub enum ServerPing {
+    Waiting,
+    Online {
+        motd: Vec<calcite_core::motd::Span>,
+        online: i32,
+        max: i32,
+        ping_ms: Option<i64>,
+        version: Option<String>,
+        favicon: Option<String>,
+    },
+    Offline,
 }
 
 #[derive(Clone, Debug)]
@@ -42,6 +63,8 @@ pub struct Extra {
     pub busy: Option<SharedString>,
     pub health: Option<Result<crate::ui::pages::health_tab::HealthReport, String>>,
     pub bisect: Option<(calcite_core::bisect::Bisect, calcite_core::bisect::Step)>,
+    /// Live status by server address.
+    pub servers: std::collections::HashMap<String, ServerPing>,
 }
 
 pub fn snapshots_dir(instance_id: &str) -> Option<PathBuf> {
@@ -108,12 +131,18 @@ impl InstancePage {
                                     icon,
                                     server,
                                     detail: detail.into(),
+                                    index: value
+                                        .get("index")
+                                        .and_then(|i| i.as_u64())
+                                        .map(|i| i as usize),
+                                    pack: value.get("pack_status").cloned(),
                                 }
                             })
                             .collect();
                         rows.sort_by_key(|r| std::cmp::Reverse(r.last_played));
                         this.extra.instance_dir = Some(path);
                         this.extra.worlds = Some(Ok(rows));
+                        this.ping_servers(cx);
                     }
                     Err(error) => this.extra.worlds = Some(Err(format!("{error:#}"))),
                 }
@@ -121,6 +150,88 @@ impl InstancePage {
             });
         })
         .detach();
+    }
+
+    pub(crate) fn remove_server(&mut self, index: usize, cx: &mut Context<Self>) {
+        let id = self.id().to_string();
+        let task = Backend::global(cx)
+            .call(async move { theseus::worlds::remove_server_from_instance(&id, index).await });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| {
+                if let Err(error) = result {
+                    this.state().update(cx, |s, cx| {
+                        s.notify_error("Couldn't remove that server", format!("{error:#}"));
+                        cx.notify();
+                    });
+                }
+                this.load_worlds(cx);
+            });
+        })
+        .detach();
+    }
+
+    /// Ping every server in the list at once (6 s each at most).
+    pub(crate) fn ping_servers(&mut self, cx: &mut Context<Self>) {
+        let Some(Ok(rows)) = &self.extra.worlds else {
+            return;
+        };
+        let addresses: Vec<String> = rows
+            .iter()
+            .filter(|w| w.server)
+            .map(|w| w.key.clone())
+            .collect();
+        if addresses.is_empty() {
+            return;
+        }
+        for address in &addresses {
+            self.extra
+                .servers
+                .insert(address.clone(), ServerPing::Waiting);
+        }
+        let id = self.id().to_string();
+        let task = Backend::global(cx).run(async move {
+            let protocol = theseus::worlds::get_instance_protocol_version(&id)
+                .await
+                .ok()
+                .flatten();
+            let pings = addresses.into_iter().map(|address| async move {
+                let status = tokio::time::timeout(
+                    std::time::Duration::from_secs(6),
+                    theseus::worlds::get_server_status(&address, protocol),
+                )
+                .await;
+                let ping = match status {
+                    Ok(Ok(status)) => ServerPing::Online {
+                        motd: status
+                            .description
+                            .as_ref()
+                            .and_then(|raw| {
+                                serde_json::from_str::<serde_json::Value>(raw.get()).ok()
+                            })
+                            .map(|v| calcite_core::motd::parse(&v))
+                            .unwrap_or_default(),
+                        online: status.players.as_ref().map(|p| p.online).unwrap_or(0),
+                        max: status.players.as_ref().map(|p| p.max).unwrap_or(0),
+                        ping_ms: status.ping,
+                        version: status.version.as_ref().map(|v| v.name.clone()),
+                        favicon: status.favicon.as_ref().map(|u| u.to_string()),
+                    },
+                    _ => ServerPing::Offline,
+                };
+                (address, ping)
+            });
+            futures::future::join_all(pings).await
+        });
+        cx.spawn(async move |this, cx| {
+            let Ok(results) = task.await else { return };
+            let _ = this.update(cx, |this, cx| {
+                this.extra.servers.extend(results);
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
     }
 
     pub(crate) fn load_shots(&mut self, cx: &mut Context<Self>) {
@@ -303,11 +414,18 @@ impl InstancePage {
                     .into_any_element();
             }
             Some(Ok(w)) if w.is_empty() => {
+                let add = Button::new("worlds-add-server-empty")
+                    .icon("plus")
+                    .label("Add server")
+                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                        cx.emit(InstancePageEvent::Server(this.id().to_string(), None))
+                    }))
+                    .into_any_element();
                 return empty_state(
                     "globe",
                     "No worlds yet",
-                    "Worlds you create or servers you add in the game show up here.",
-                    None,
+                    "Worlds you create in the game show up here. Add a server to join it straight from Calcite.",
+                    Some(add),
                     cx,
                 )
                 .into_any_element();
@@ -323,13 +441,24 @@ impl InstancePage {
             .pt(space(3.0))
             .pb(space(8.0));
         for (ix, world) in worlds.into_iter().enumerate() {
-            let icon_src: Option<ImageSource> = world.icon.as_deref().and_then(|i| {
-                if i.starts_with("http") {
-                    Images::get(i, 96, cx)
-                } else {
-                    Images::get_file(std::path::Path::new(i), 96, cx)
-                }
-            });
+            let ping = world
+                .server
+                .then(|| self.extra.servers.get(&world.key).cloned())
+                .flatten();
+            let favicon = match &ping {
+                Some(ServerPing::Online {
+                    favicon: Some(f), ..
+                }) => Some(f.clone()),
+                _ => None,
+            };
+            let icon_src: Option<ImageSource> =
+                favicon.or(world.icon.clone()).as_deref().and_then(|i| {
+                    if i.starts_with("http") || i.starts_with("data:") {
+                        Images::get(i, 96, cx)
+                    } else {
+                        Images::get_file(std::path::Path::new(i), 96, cx)
+                    }
+                });
             let when = world.last_played.map(relative_time).unwrap_or_default();
             let (play_world, backup, open_dir) = (world.clone(), world.clone(), dir.clone());
             let play_id = instance_id.clone();
@@ -380,18 +509,102 @@ impl InstancePage {
                                     .text_color(p.text)
                                     .child(world.name.clone()),
                             )
-                            .child(
-                                div()
+                            .child(match &ping {
+                                Some(ServerPing::Online { motd, .. }) if !motd.is_empty() => {
+                                    motd_line(motd, cx)
+                                }
+                                _ => div()
+                                    .truncate()
                                     .text_size(px(type_scale::SMALL))
                                     .text_color(p.text_muted)
                                     .child(if when.is_empty() {
                                         world.detail.to_string()
                                     } else {
                                         format!("{} · {when}", world.detail)
-                                    }),
-                            ),
+                                    })
+                                    .into_any_element(),
+                            }),
                     )
-                    .when(world.server, |d| d.child(chip("Server", cx)))
+                    .when(world.server, |d| {
+                        let status: AnyElement = match &ping {
+                            Some(ServerPing::Online {
+                                online,
+                                max,
+                                ping_ms,
+                                version,
+                                ..
+                            }) => div()
+                                .flex()
+                                .items_center()
+                                .gap(space(1.5))
+                                .child(icon_chip(
+                                    "users",
+                                    format!(
+                                        "{} / {}",
+                                        crate::ui::components::compact_number(
+                                            (*online).max(0) as u64
+                                        ),
+                                        crate::ui::components::compact_number((*max).max(0) as u64)
+                                    ),
+                                    cx,
+                                ))
+                                .when_some(*ping_ms, |d, ms| d.child(latency_chip(ms, cx)))
+                                .when_some(version.clone().filter(|v| v.len() <= 24), |d, v| {
+                                    d.child(chip(v, cx))
+                                })
+                                .into_any_element(),
+                            Some(ServerPing::Offline) => {
+                                state_chip("Can't reach it", p.text_muted, p.raised)
+                                    .into_any_element()
+                            }
+                            _ => crate::ui::components::skeleton(px(90.0), px(20.0), cx)
+                                .into_any_element(),
+                        };
+                        let edit = crate::ui::server_dialog::Existing {
+                            index: world.index.unwrap_or(0),
+                            name: world.name.to_string(),
+                            address: world.key.clone(),
+                            pack: world.pack.clone(),
+                        };
+                        let (join_id, join_address) = (instance_id.clone(), world.key.clone());
+                        let remove_index = world.index;
+                        d.child(status)
+                            .child(
+                                Button::new(SharedString::from(format!("server-edit-{ix}")))
+                                    .icon("settings")
+                                    .ghost()
+                                    .small()
+                                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                        cx.emit(InstancePageEvent::Server(
+                                            this.id().to_string(),
+                                            Some(edit.clone()),
+                                        ))
+                                    })),
+                            )
+                            .child(
+                                Button::new(SharedString::from(format!("server-remove-{ix}")))
+                                    .icon("trash")
+                                    .ghost()
+                                    .small()
+                                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                        if let Some(index) = remove_index {
+                                            this.remove_server(index, cx)
+                                        }
+                                    })),
+                            )
+                            .child(
+                                Button::new(SharedString::from(format!("server-join-{ix}")))
+                                    .icon("play")
+                                    .label("Join")
+                                    .small()
+                                    .primary()
+                                    .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
+                                        let (id, address) = (join_id.clone(), join_address.clone());
+                                        AppState::global(cx)
+                                            .update(cx, |s, cx| s.play_server(&id, address, cx));
+                                    })),
+                            )
+                    })
                     .when(!world.server, |d| {
                         d.child(
                             Button::new(SharedString::from(format!("world-folder-{ix}")))
@@ -431,11 +644,35 @@ impl InstancePage {
                     }),
             );
         }
+        let add_bar = div()
+            .flex()
+            .justify_end()
+            .gap(space(2.0))
+            .px(space(8.0))
+            .pt(space(4.0))
+            .child(
+                Button::new("worlds-refresh")
+                    .icon("refresh-cw")
+                    .label("Refresh")
+                    .ghost()
+                    .small()
+                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.load_worlds(cx))),
+            )
+            .child(
+                Button::new("worlds-add-server")
+                    .icon("plus")
+                    .label("Add server")
+                    .small()
+                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                        cx.emit(InstancePageEvent::Server(this.id().to_string(), None))
+                    })),
+            );
         div()
             .size_full()
             .flex()
             .flex_col()
             .children(self.busy_bar(cx))
+            .child(add_bar)
             .child(
                 div()
                     .id("worlds-scroll")
@@ -681,4 +918,56 @@ fn title(s: &str) -> String {
         Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
         None => String::new(),
     }
+}
+
+/// The first line of a server's MOTD in its own colours, kept readable on
+/// the current theme.
+fn motd_line(spans: &[calcite_core::motd::Span], cx: &App) -> AnyElement {
+    let p = cx.palette();
+    let dark = p.surface.l < 0.5;
+    let mut first = calcite_core::motd::lines(spans)
+        .into_iter()
+        .next()
+        .unwrap_or_default();
+    // Servers pad MOTDs with spaces to centre them in game; drop that here.
+    if let Some(lead) = first.first_mut() {
+        lead.text = lead.text.trim_start().to_string();
+    }
+    div()
+        .flex()
+        .min_w_0()
+        .overflow_hidden()
+        .whitespace_nowrap()
+        .text_size(px(type_scale::SMALL))
+        .children(first.into_iter().map(|span| {
+            let color = match span.color {
+                Some(rgb) => {
+                    let mut c: gpui_kit::Hsla = gpui_kit::rgb(rgb).into();
+                    // Dark blues on a dark theme (or white on light) vanish.
+                    c.l = if dark { c.l.max(0.62) } else { c.l.min(0.42) };
+                    c
+                }
+                None => p.text_secondary,
+            };
+            div()
+                .flex_none()
+                .text_color(color)
+                .when(span.bold, |d| d.font_weight(FontWeight::SEMIBOLD))
+                .when(span.italic, |d| d.italic())
+                .child(span.text)
+        }))
+        .into_any_element()
+}
+
+/// Latency with a colour hint: green under 100 ms, amber under 250.
+fn latency_chip(ms: i64, cx: &App) -> gpui_kit::Div {
+    let p = cx.palette();
+    let (fg, bg) = if ms < 100 {
+        (p.running, p.running_soft)
+    } else if ms < 250 {
+        (p.warning, p.warning_soft)
+    } else {
+        (p.danger, p.danger_soft)
+    };
+    state_chip(format!("{ms} ms"), fg, bg)
 }

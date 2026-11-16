@@ -11,6 +11,7 @@ pub mod markup;
 pub mod modrinth;
 pub mod modrinth_auth;
 pub mod monitor;
+pub mod motd;
 pub mod skin3d;
 pub mod snapshots;
 pub mod storage;

@@ -226,6 +226,37 @@ fn take_snapshot(window: gpui_kit::AnyWindowHandle, page: String, out: String, c
                     wait(5000).await;
                     continue;
                 }
+                if let Some(address) = word.strip_prefix("add-server=") {
+                    let (id, address) = (
+                        std::env::var("CALCITE_SNAPSHOT_INSTANCE").unwrap_or_default(),
+                        address.to_string(),
+                    );
+                    let task = cx.update(|cx| {
+                        Backend::global(cx).call(async move {
+                            theseus::worlds::add_server_to_instance(
+                                &id,
+                                address.clone(),
+                                address,
+                                theseus::worlds::ServerPackStatus::Prompt,
+                                None,
+                                None,
+                            )
+                            .await
+                        })
+                    });
+                    let _ = task.await;
+                    continue;
+                }
+                if word == "reload-worlds" {
+                    let _ = cx.update_window(window, |root, _, cx| {
+                        if let Ok(root) = root.downcast::<Root>()
+                            && let Ok(shell) = root.read(cx).view().clone().downcast::<Shell>()
+                        {
+                            shell.update(cx, |shell, cx| shell.with_instance_page(cx, |p, cx| p.load_worlds(cx)));
+                        }
+                    });
+                    continue;
+                }
                 if word == "demo-friends" {
                     cx.update(|cx| AppState::global(cx).update(cx, |s, cx| s.demo_friends(cx)));
                     continue;
@@ -238,6 +269,13 @@ fn take_snapshot(window: gpui_kit::AnyWindowHandle, page: String, out: String, c
                     shell.update(cx, |shell, cx| {
                         if word == "join" {
                             shell.open_join(window, cx);
+                        }
+                        if let Some(text) = word.strip_prefix("search=") {
+                            shell.type_search(text, window, cx);
+                        }
+                        if word == "change-version" {
+                            let id = std::env::var("CALCITE_SNAPSHOT_INSTANCE").unwrap_or_default();
+                            shell.request_change_version(id, cx);
                         }
                         if let Some(skins) = shell.skins_page()
                             && word == "skins-back"

@@ -1,7 +1,7 @@
 //! The window frame: title bar, sidebar, page area, dialogs and notices.
 
-use gpui_kit::component::TitleBar;
-use gpui_kit::component::input::{InputEvent, InputState};
+use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::{Sizable as _, TitleBar};
 use gpui_kit::prelude::*;
 use gpui_kit::{
     AnyElement, App, ClickEvent, Context, Entity, FontWeight, ImageSource, SharedString,
@@ -84,6 +84,11 @@ pub struct Shell {
     skins: Option<Entity<crate::ui::pages::skins::SkinsPage>>,
     dialog: Option<gpui_kit::AnyView>,
     pub library_filter: Entity<InputState>,
+    /// The title bar search field.
+    global_search: Entity<InputState>,
+    /// "Change version" asked for from instance settings; opened on the
+    /// next render (it needs the window).
+    pending_change_version: Option<String>,
     pub library_sort: LibrarySort,
     account_menu_open: bool,
     all_friends: bool,
@@ -98,7 +103,27 @@ impl Shell {
         let discover = cx.new(|cx| DiscoverPage::new(window, cx));
         let library_filter =
             cx.new(|cx| InputState::new(window, cx).placeholder("Filter instances"));
+        let global_search =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Search mods, modpacks, shaders…"));
         let subscriptions = vec![
+            // Typing in the title bar searches Modrinth live, on Discover.
+            cx.subscribe_in(
+                &global_search,
+                window,
+                |this, input, event: &InputEvent, window, cx| {
+                    if matches!(event, InputEvent::Change | InputEvent::PressEnter { .. }) {
+                        let text = input.read(cx).value().to_string();
+                        if text.trim().is_empty() && this.route != Route::Discover {
+                            return;
+                        }
+                        if this.route != Route::Discover {
+                            this.open_discover(None, window, cx);
+                        }
+                        this.discover
+                            .update(cx, |d, cx| d.search_for(text, window, cx));
+                    }
+                },
+            ),
             cx.observe(&state, |_, _, cx| cx.notify()),
             cx.subscribe_in(
                 &discover,
@@ -130,6 +155,8 @@ impl Shell {
             skins: None,
             dialog: None,
             library_filter,
+            global_search,
+            pending_change_version: None,
             library_sort: LibrarySort::LastPlayed,
             account_menu_open: false,
             all_friends: false,
@@ -163,6 +190,17 @@ impl Shell {
                         }
                         InstancePageEvent::OpenSettings(id) => {
                             this.open_instance_settings(id.clone(), window, cx)
+                        }
+                        InstancePageEvent::Server(id, existing) => {
+                            let dialog = cx.new(|cx| {
+                                crate::ui::server_dialog::ServerDialog::new(
+                                    id.clone(),
+                                    existing.clone(),
+                                    window,
+                                    cx,
+                                )
+                            });
+                            this.show_dialog(dialog, cx);
                         }
                         InstancePageEvent::Share(id) => {
                             let dialog =
@@ -360,6 +398,16 @@ impl Shell {
                 this.dialog = None;
                 cx.notify();
             }
+            DialogEvent::WorldsChanged => {
+                this.dialog = None;
+                this.with_instance_page(cx, |p, cx| p.load_worlds(cx));
+                cx.notify();
+            }
+            DialogEvent::ChangeVersion(id) => {
+                this.dialog = None;
+                this.pending_change_version = Some(id.clone());
+                cx.notify();
+            }
         })
         .detach();
         self.dialog = Some(dialog.into());
@@ -387,6 +435,24 @@ impl Shell {
         cx.notify();
     }
 
+    /// Dev hook: type into the title bar search.
+    #[cfg_attr(not(feature = "snapshot"), allow(dead_code))]
+    pub fn type_search(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.global_search
+            .update(cx, |s, cx| s.set_value(text.to_string(), window, cx));
+        self.open_discover(None, window, cx);
+        let text = text.to_string();
+        self.discover
+            .update(cx, |d, cx| d.search_for(text, window, cx));
+    }
+
+    /// Dev hook: open "Change version" for an instance.
+    #[cfg_attr(not(feature = "snapshot"), allow(dead_code))]
+    pub fn request_change_version(&mut self, id: String, cx: &mut Context<Self>) {
+        self.pending_change_version = Some(id);
+        cx.notify();
+    }
+
     pub fn open_join(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let dialog = cx.new(|cx| crate::ui::share::JoinDialog::new(window, cx));
         self.show_dialog(dialog, cx);
@@ -408,7 +474,6 @@ impl Shell {
     }
 
     /// Run `f` against the open instance page, if one is showing.
-    #[cfg_attr(not(feature = "snapshot"), allow(dead_code))]
     pub fn with_instance_page(
         &mut self,
         cx: &mut Context<Self>,
@@ -537,34 +602,31 @@ impl Shell {
                     .child(crumbs),
             )
             .child(
-                // The command palette trigger. Milestone 9 adds ⌘K; for now it opens Discover.
+                // Search Modrinth from anywhere; results show on Discover.
                 div()
-                    .id("palette-trigger")
+                    .id("global-search")
                     .flex()
                     .items_center()
-                    .gap(space(2.0))
+                    .gap(space(1.0))
                     .h(px(28.0))
                     .w(px(440.0))
                     // Sit 6px below the top edge, a touch lower than centre.
                     .relative()
                     .top(px(1.0))
-                    .px(space(3.0))
+                    .pl(space(3.0))
                     .rounded(px(radius::SM))
                     .bg(p.surface)
                     .border_1()
                     .border_color(p.border)
-                    .cursor_pointer()
                     .hover(|s| s.border_color(p.border_strong))
-                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                        this.open_discover(None, window, cx)
-                    }))
                     .child(icon("search", 14.0, p.text_muted))
                     .child(
-                        div()
-                            .flex_1()
-                            .text_size(px(type_scale::SMALL))
-                            .text_color(p.text_muted)
-                            .child("Search Modrinth"),
+                        div().flex_1().min_w_0().child(
+                            Input::new(&self.global_search)
+                                .appearance(false)
+                                .cleanable(true)
+                                .small(),
+                        ),
                     ),
             )
             .child(
@@ -1184,6 +1246,10 @@ impl Shell {
 
 impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some(id) = self.pending_change_version.take() {
+            let dialog = cx.new(|cx| CreateInstanceDialog::change_version(id, window, cx));
+            self.show_dialog(dialog, cx);
+        }
         let p = cx.palette().clone();
         let page = self.page(window, cx);
         let notice = self.notice(cx);

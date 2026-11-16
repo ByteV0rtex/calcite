@@ -24,6 +24,8 @@ use crate::ui::pages::discover::Api;
 /// Preview and card sizes in logical pixels.
 const PREVIEW: (f32, f32) = (260.0, 380.0);
 const CARD: (f32, f32) = (84.0, 126.0);
+/// Cape pictures keep the cape's 10:16 shape.
+const CAPE_TILE: (f32, f32) = (30.0, 48.0);
 /// The view cards are drawn from.
 const CARD_VIEW: View = View {
     yaw: -0.4,
@@ -62,6 +64,7 @@ pub struct SkinsPage {
     /// Normalized skin textures by texture key.
     textures: HashMap<Arc<str>, Arc<RgbaImage>>,
     cape_textures: HashMap<Uuid, Arc<RgbaImage>>,
+    cape_thumbs: HashMap<Uuid, Arc<RenderImage>>,
     thumbs: HashMap<SkinId, Arc<RenderImage>>,
     loading_textures: HashSet<Arc<str>>,
     open_sections: HashSet<String>,
@@ -83,6 +86,7 @@ impl SkinsPage {
             capes: Vec::new(),
             textures: HashMap::new(),
             cape_textures: HashMap::new(),
+            cape_thumbs: HashMap::new(),
             thumbs: HashMap::new(),
             loading_textures: HashSet::new(),
             open_sections: OPEN_BY_DEFAULT.iter().map(|s| s.to_string()).collect(),
@@ -132,6 +136,9 @@ impl SkinsPage {
                 }
                 this.fetch_textures(cx);
                 this.fetch_capes(cx);
+                // What's equipped may have changed (skin, cape or arms).
+                this.draw_thumbs(cx);
+                this.draw_preview(cx);
                 cx.notify();
             });
         })
@@ -212,6 +219,9 @@ impl SkinsPage {
         cx.spawn(async move |this, cx| {
             let Ok(found) = task.await else { return };
             let _ = this.update(cx, |this, cx| {
+                for (id, texture) in &found {
+                    this.cape_thumbs.insert(*id, cape_picture(texture));
+                }
                 this.cape_textures.extend(found);
                 this.draw_preview(cx);
                 cx.notify();
@@ -380,6 +390,14 @@ impl SkinsPage {
         let cape_id = cape.unwrap_or(skin.cape_id);
         let cape = cape_id.and_then(|id| self.capes.iter().find(|c| c.id == id).cloned());
         let slim = slim.unwrap_or(is_slim(&skin));
+        // Show the change right away; the reload afterwards confirms it.
+        if let Some(Ok(skins)) = &mut self.skins
+            && let Some(worn) = skins.iter_mut().find(|s| s.is_equipped)
+        {
+            worn.cape_id = cape_id;
+            worn.variant = variant(slim);
+        }
+        self.draw_preview(cx);
         let task = Backend::global(cx).call(async move {
             let texture: Bytes = theseus::minecraft_skins::normalize_skin_texture(&UrlOrBlob::Url(
                 (*skin.texture).clone(),
@@ -574,24 +592,76 @@ impl SkinsPage {
                         }))
                     },
                 ));
-        let mut capes =
-            div().flex().flex_wrap().gap(space(1.5)).child(
-                option("cape-none".into(), "No cape".into(), cape_now.is_none()).when(
-                    can_change && cape_now.is_some(),
-                    |d| {
-                        d.on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                            this.restyle(Some(None), None, cx)
-                        }))
-                    },
-                ),
-            );
+        // Capes as pictures of their outer side, named underneath.
+        let tile = |id: SharedString, name: SharedString, picture: AnyElement, active: bool| {
+            div()
+                .id(id)
+                .flex()
+                .flex_col()
+                .items_center()
+                .gap(space(1.0))
+                .w(px(66.0))
+                .pt(space(2.0))
+                .pb(space(1.5))
+                .rounded(px(radius::MD))
+                .border_1()
+                .when(active, |d| d.border_color(p.accent).bg(p.accent_soft))
+                .when(!active, |d| {
+                    d.border_color(p.border).hover(|s| s.bg(p.hover))
+                })
+                .when(can_change && !active, |d| d.cursor_pointer())
+                .child(picture)
+                .child(
+                    div()
+                        .w_full()
+                        .px(space(1.0))
+                        .truncate()
+                        .text_center()
+                        .text_size(px(type_scale::CAPTION))
+                        .text_color(if active { p.text } else { p.text_secondary })
+                        .child(name),
+                )
+        };
+        let empty_picture = || {
+            div()
+                .w(px(CAPE_TILE.0))
+                .h(px(CAPE_TILE.1))
+                .rounded(px(2.0))
+                .bg(p.raised)
+                .flex()
+                .items_center()
+                .justify_center()
+        };
+        let mut capes = div().flex().flex_wrap().gap(space(1.5)).child(
+            tile(
+                "cape-none".into(),
+                "No cape".into(),
+                empty_picture()
+                    .child(icon("ban", 14.0, p.text_muted))
+                    .into_any_element(),
+                cape_now.is_none(),
+            )
+            .when(can_change && cape_now.is_some(), |d| {
+                d.on_click(
+                    cx.listener(|this, _: &ClickEvent, _, cx| this.restyle(Some(None), None, cx)),
+                )
+            }),
+        );
         for cape in &self.capes {
             let id = cape.id;
             let active = cape_now == Some(id);
+            let picture = match self.cape_thumbs.get(&id) {
+                Some(image) => img(ImageSource::Render(image.clone()))
+                    .w(px(CAPE_TILE.0))
+                    .h(px(CAPE_TILE.1))
+                    .into_any_element(),
+                None => empty_picture().into_any_element(),
+            };
             capes = capes.child(
-                option(
+                tile(
                     SharedString::from(format!("cape-{id}")),
                     cape.name.to_string().into(),
+                    picture,
                     active,
                 )
                 .when(can_change && !active, |d| {
@@ -830,6 +900,28 @@ impl SkinsPage {
         }
         out.into_any_element()
     }
+}
+
+/// A cape's outer side (texels 1,1 to 11,17 of a 64×32 texture, scaled for
+/// HD capes), enlarged with crisp pixels.
+fn cape_picture(texture: &RgbaImage) -> Arc<RenderImage> {
+    let k = (texture.width() / 64).max(1);
+    let (x0, y0, w, h) = (k, k, 10 * k, 16 * k);
+    let crop = image::imageops::crop_imm(
+        texture,
+        x0,
+        y0,
+        w.min(texture.width().saturating_sub(x0)),
+        h.min(texture.height().saturating_sub(y0)),
+    )
+    .to_image();
+    let scaled = image::imageops::resize(
+        &crop,
+        CAPE_TILE.0 as u32 * 2,
+        CAPE_TILE.1 as u32 * 2,
+        image::imageops::FilterType::Nearest,
+    );
+    render_image(scaled)
 }
 
 fn is_custom(skin: &Skin) -> bool {

@@ -6,5 +6,6 @@ pub mod instance_settings;
 pub mod look;
 pub mod onboarding;
 pub mod pages;
+pub mod server_dialog;
 pub mod share;
 pub mod shell;

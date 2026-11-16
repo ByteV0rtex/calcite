@@ -70,8 +70,13 @@ impl Images {
         let url = url.to_string();
         let backend = Backend::global(cx).clone();
         let fetch = backend.run(async move {
-            // Local files (screenshots, world icons) are read from disk.
-            let bytes = if url.starts_with('/') || url.contains(":\\") {
+            // Local files (screenshots, world icons) are read from disk;
+            // data URLs (server icons) carry the image inline.
+            let bytes = if let Some(data) = url.strip_prefix("data:") {
+                use base64::Engine;
+                let encoded = data.split_once(',').map(|(_, b)| b).unwrap_or_default();
+                base64::engine::general_purpose::STANDARD.decode(encoded.trim())?
+            } else if url.starts_with('/') || url.contains(":\\") {
                 tokio::fs::read(&url).await?
             } else {
                 client.bytes(&url).await?

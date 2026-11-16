@@ -28,6 +28,10 @@ const LOADERS: [ModLoader; 5] = [
 
 pub enum DialogEvent {
     Close,
+    /// Saved something that changes the open instance's worlds/servers.
+    WorldsChanged,
+    /// Swap this dialog for "Change version" on that instance.
+    ChangeVersion(String),
 }
 
 type VersionSelect = SelectState<SearchableVec<SharedString>>;
@@ -44,10 +48,75 @@ pub struct CreateInstanceDialog {
     loader_select: Entity<VersionSelect>,
     game_version: Option<String>,
     loader_version: Option<String>,
+    /// Set when changing an existing instance's version instead of
+    /// creating one.
+    changing: Option<String>,
     _subscriptions: Vec<Subscription>,
 }
 
 impl EventEmitter<DialogEvent> for CreateInstanceDialog {}
+
+impl CreateInstanceDialog {
+    /// Change an instance's Minecraft version or loader. Starts on what it
+    /// has now; applying reinstalls the game files (mods stay).
+    pub fn change_version(
+        instance_id: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let mut dialog = Self::new(window, cx);
+        if let Some(inst) = AppState::global(cx)
+            .read(cx)
+            .instance(&instance_id)
+            .cloned()
+        {
+            dialog.loader = inst.loader;
+            dialog.game_version = Some(inst.game_version.to_string());
+        }
+        dialog.changing = Some(instance_id);
+        dialog
+    }
+
+    fn apply_change(&mut self, cx: &mut Context<Self>) {
+        let (Some(id), Some(game_version)) = (self.changing.clone(), self.game_version.clone())
+        else {
+            return;
+        };
+        let loader = self.loader;
+        let loader_version = self
+            .loader_version
+            .clone()
+            .map(|v| v.trim_end_matches(" (beta)").to_string());
+        let patch = theseus::data::EditInstance {
+            content_set_patch: Some(theseus::data::AppliedContentSetPatch {
+                loader: Some(loader),
+                game_version: Some(game_version),
+                loader_version: Some(loader_version.filter(|_| loader != ModLoader::Vanilla)),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let task = Backend::global(cx).call(async move {
+            theseus::instance::edit(&id, patch).await?;
+            theseus::install::install_existing_instance(id, false).await
+        });
+        let state = AppState::global(cx);
+        cx.spawn(async move |_, cx| {
+            let result = task.await;
+            state.update(cx, |state, cx| {
+                match result {
+                    Ok(job) => state.track_job(job, cx),
+                    Err(error) => {
+                        state.notify_error("Couldn't change the version", format!("{error:#}"))
+                    }
+                }
+                state.refresh_all(cx);
+            });
+        })
+        .detach();
+        cx.emit(DialogEvent::Close);
+    }
+}
 
 impl CreateInstanceDialog {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -95,6 +164,7 @@ impl CreateInstanceDialog {
             loader_select,
             game_version: None,
             loader_version: None,
+            changing: None,
             _subscriptions: subscriptions,
         };
         dialog.load(window, cx);
@@ -411,7 +481,7 @@ impl Render for CreateInstanceDialog {
                             .text_size(px(type_scale::SECTION))
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(p.text)
-                            .child("New instance"),
+                            .child(if self.changing.is_some() { "Change version" } else { "New instance" }),
                     )
                     .child(
                         Button::new("dialog-close")
@@ -430,7 +500,17 @@ impl Render for CreateInstanceDialog {
                     .gap(space(5.0))
                     .px(space(6.0))
                     .py(space(5.0))
-                    .child(field("Name", Input::new(&self.name).into_any_element()))
+                    .when(self.changing.is_none(), |d| {
+                        d.child(field("Name", Input::new(&self.name).into_any_element()))
+                    })
+                    .when(self.changing.is_some(), |d| {
+                        d.child(
+                            div()
+                                .text_size(px(type_scale::SMALL))
+                                .text_color(p.text_secondary)
+                                .child("Calcite reinstalls the game for the new version. Your worlds and settings stay; mods that don't fit the new version won't load until you update them."),
+                        )
+                    })
                     .child(field("Mod loader", loaders.into_any_element()))
                     .child(versions)
                     .child(snapshots_toggle),
@@ -450,11 +530,17 @@ impl Render for CreateInstanceDialog {
                     ))
                     .child(
                         Button::new("dialog-create")
-                            .icon("plus")
-                            .label("Create")
+                            .icon(if self.changing.is_some() { "refresh-cw" } else { "plus" })
+                            .label(if self.changing.is_some() { "Change version" } else { "Create" })
                             .primary()
                             .disabled(!can_create)
-                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.create(cx))),
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                if this.changing.is_some() {
+                                    this.apply_change(cx)
+                                } else {
+                                    this.create(cx)
+                                }
+                            })),
                     ),
             )
     }

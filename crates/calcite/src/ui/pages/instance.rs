@@ -111,6 +111,8 @@ pub enum InstancePageEvent {
     OpenProject(String),
     OpenSettings(String),
     Share(String),
+    /// Add (None) or edit a server in this instance's list.
+    Server(String, Option<crate::ui::server_dialog::Existing>),
 }
 
 impl gpui_kit::EventEmitter<InstancePageEvent> for InstancePage {}

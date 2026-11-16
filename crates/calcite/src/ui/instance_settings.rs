@@ -19,6 +19,7 @@ use crate::ui::create_instance::DialogEvent;
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Section {
     General,
+    Installation,
     Java,
     Window,
     Hooks,
@@ -318,6 +319,102 @@ impl InstanceSettings {
         .detach();
     }
 
+    /// Re-download and re-check every game file (mods untouched).
+    fn repair(&mut self, cx: &mut Context<Self>) {
+        let id = self.id.clone();
+        let task = Backend::global(cx)
+            .call(async move { theseus::install::install_existing_instance(id, true).await });
+        let state = AppState::global(cx);
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            state.update(cx, |state, cx| match result {
+                Ok(job) => state.track_job(job, cx),
+                Err(error) => {
+                    state.notify_error("Couldn't repair the instance", format!("{error:#}"))
+                }
+            });
+            let _ = this.update(cx, |_, cx| cx.emit(DialogEvent::Close));
+        })
+        .detach();
+    }
+
+    fn installation(&self, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
+        let p = cx.palette().clone();
+        let inst = AppState::global(cx).read(cx).instance(&self.id).cloned();
+        let row = |label: &'static str, value: String| {
+            div()
+                .flex()
+                .justify_between()
+                .py(space(2.0))
+                .border_b_1()
+                .border_color(p.border)
+                .text_size(px(type_scale::BODY))
+                .child(div().text_color(p.text_muted).child(label))
+                .child(div().text_color(p.text).child(value))
+        };
+        let note = |text: &'static str| {
+            div()
+                .text_size(px(type_scale::CAPTION))
+                .text_color(p.text_muted)
+                .child(text)
+        };
+        let mut info = div().flex().flex_col();
+        if let Some(inst) = &inst {
+            info = info
+                .child(row(
+                    "Mod loader",
+                    crate::state::loader_name(inst.loader).to_string(),
+                ))
+                .child(row("Minecraft version", inst.game_version.to_string()))
+                .when_some(inst.loader_version.clone(), |d, v| {
+                    d.child(row("Loader version", v.to_string()))
+                });
+        }
+        let modpack = inst.as_ref().is_some_and(|i| i.is_modpack);
+        div()
+            .flex()
+            .flex_col()
+            .gap(space(5.0))
+            .child(info)
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(space(2.0))
+                    .child(
+                        div().flex().child(
+                            Button::new("is-change-version")
+                                .icon("refresh-cw")
+                                .label("Change version…")
+                                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                    cx.emit(DialogEvent::ChangeVersion(this.id.clone()))
+                                })),
+                        ),
+                    )
+                    .child(note(if modpack {
+                        "This instance comes from a modpack; changing the version can break it. Update the modpack instead when you can."
+                    } else {
+                        "Switch Minecraft version or mod loader. Worlds and settings stay."
+                    })),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(space(2.0))
+                    .child(
+                        div().flex().child(
+                            Button::new("is-repair")
+                                .icon("wrench")
+                                .label("Repair")
+                                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.repair(cx))),
+                        ),
+                    )
+                    .child(note("If the game won't start or files went missing: checks and re-downloads Minecraft, the loader, libraries and Java. Your mods and worlds aren't touched.")),
+            )
+            .into_any_element()
+    }
+
     fn delete(&mut self, cx: &mut Context<Self>) {
         let id = self.id.clone();
         let task = Backend::global(cx).call(async move { theseus::instance::remove(&id).await });
@@ -372,6 +469,7 @@ impl Render for InstanceSettings {
             .flex_none();
         for (section, label, glyph) in [
             (Section::General, "General", "settings"),
+            (Section::Installation, "Installation", "wrench"),
             (Section::Java, "Java & memory", "memory-stick"),
             (Section::Window, "Window", "monitor"),
             (Section::Hooks, "Launch hooks", "terminal"),
@@ -471,6 +569,7 @@ impl Render for InstanceSettings {
                     },
                 ))
                 .into_any_element(),
+            Section::Installation => self.installation(cx),
             Section::Java => div()
                 .flex()
                 .flex_col()

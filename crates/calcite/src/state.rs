@@ -815,6 +815,17 @@ impl AppState {
         )
     }
 
+    /// Start the game and join a server right away.
+    pub fn play_server(&mut self, instance_id: &str, address: String, cx: &mut Context<Self>) {
+        self.launch(
+            instance_id,
+            theseus::instance::QuickPlayType::Server(
+                theseus::server_address::ServerAddress::Unresolved(address),
+            ),
+            cx,
+        )
+    }
+
     fn launch(
         &mut self,
         instance_id: &str,

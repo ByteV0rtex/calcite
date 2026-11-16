@@ -129,6 +129,19 @@ impl DiscoverPage {
         page
     }
 
+    /// Search for `text` (from the title bar), keeping this page's own
+    /// search box in step.
+    pub fn search_for(&mut self, text: String, window: &mut Window, cx: &mut Context<Self>) {
+        if self.query.text == text {
+            return;
+        }
+        self.input
+            .update(cx, |input, cx| input.set_value(text.clone(), window, cx));
+        self.query.text = text;
+        self.query.offset = 0;
+        self.search(Duration::from_millis(250), cx);
+    }
+
     /// Show only what fits `instance_id` and install straight into it.
     /// `None` returns to browsing everything.
     pub fn set_target(
