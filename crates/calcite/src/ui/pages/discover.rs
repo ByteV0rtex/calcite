@@ -55,6 +55,11 @@ pub struct DiscoverPage {
     /// Project ids already in the target instance.
     installed: std::collections::HashSet<String>,
     pending: Option<Task<()>>,
+    /// Modrinth's categories (name, project type), for the chips.
+    categories: Vec<(String, String)>,
+    /// Modpack projects that already have an instance here.
+    installed_packs: std::collections::HashSet<String>,
+    hide_installed: bool,
     /// The Servers tab (made the first time it's opened).
     servers: Option<Entity<crate::ui::pages::servers::ServersBrowser>>,
     showing_servers: bool,
@@ -128,9 +133,14 @@ impl DiscoverPage {
             pending: None,
             servers: None,
             showing_servers: false,
+            categories: Vec::new(),
+            installed_packs: Default::default(),
+            hide_installed: false,
             _subscriptions: subscriptions,
         };
         page.search(Duration::ZERO, cx);
+        page.load_categories(cx);
+        page.load_installed_packs(cx);
         page
     }
 
@@ -222,7 +232,58 @@ impl DiscoverPage {
             }
             return;
         }
+        self.query.categories.clear();
         self.set_type_inner(project_type, window, cx);
+        self.search(Duration::ZERO, cx);
+    }
+
+    fn load_categories(&mut self, cx: &mut Context<Self>) {
+        let client = cx.global::<Api>().0.clone();
+        let fetch = Backend::global(cx).run(async move { client.categories().await });
+        cx.spawn(async move |this, cx| {
+            if let Ok(Ok(all)) = fetch.await {
+                let _ = this.update(cx, |this, cx| {
+                    this.categories = all
+                        .into_iter()
+                        .filter(|c| c.header == "categories")
+                        .map(|c| (c.name, c.project_type))
+                        .collect();
+                    this.categories.sort();
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+    }
+
+    /// Which modpacks already have an instance, to mark or hide them.
+    pub fn load_installed_packs(&mut self, cx: &mut Context<Self>) {
+        let fetch = Backend::global(cx).call(async { theseus::instance::list().await });
+        cx.spawn(async move |this, cx| {
+            if let Ok(list) = fetch.await {
+                let _ = this.update(cx, |this, cx| {
+                    this.installed_packs = list
+                        .into_iter()
+                        .filter_map(|m| match m.link {
+                            theseus::data::InstanceLink::ModrinthModpack { project_id, .. } => {
+                                Some(project_id)
+                            }
+                            _ => None,
+                        })
+                        .collect();
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+    }
+
+    fn toggle_category(&mut self, name: &str, cx: &mut Context<Self>) {
+        if let Some(ix) = self.query.categories.iter().position(|c| c == name) {
+            self.query.categories.remove(ix);
+        } else {
+            self.query.categories.push(name.to_string());
+        }
         self.search(Duration::ZERO, cx);
     }
 
@@ -395,7 +456,110 @@ impl DiscoverPage {
                     );
             }
         }
-        row
+        let pill = |key: SharedString, label: &'static str, active: bool| {
+            div()
+                .id(key)
+                .h(px(26.0))
+                .px(space(2.5))
+                .flex()
+                .items_center()
+                .gap(space(1.0))
+                .rounded(px(radius::SM))
+                .text_size(px(type_scale::SMALL))
+                .cursor_pointer()
+                .when(active, |d| d.bg(p.accent_soft).text_color(p.accent_text))
+                .when(!active, |d| {
+                    d.text_color(p.text_muted).hover(|s| s.text_color(p.text))
+                })
+                .when(active, |d| d.child(icon("check", 11.0, p.accent_text)))
+                .child(label)
+        };
+        row = row.child(div().flex_1());
+        if self.query.project_type == ProjectType::Mod {
+            row = row
+                .child(
+                    pill(
+                        "f-client".into(),
+                        "Client only",
+                        self.query.client_side_only,
+                    )
+                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                        this.query.client_side_only = !this.query.client_side_only;
+                        this.query.server_side_only = false;
+                        this.search(Duration::ZERO, cx);
+                    })),
+                )
+                .child(
+                    pill(
+                        "f-server".into(),
+                        "Needs the server too",
+                        self.query.server_side_only,
+                    )
+                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                        this.query.server_side_only = !this.query.server_side_only;
+                        this.query.client_side_only = false;
+                        this.search(Duration::ZERO, cx);
+                    })),
+                );
+        }
+        row = row.child(
+            pill("f-open".into(), "Open source", self.query.open_source_only).on_click(
+                cx.listener(|this, _: &ClickEvent, _, cx| {
+                    this.query.open_source_only = !this.query.open_source_only;
+                    this.search(Duration::ZERO, cx);
+                }),
+            ),
+        );
+        if self.query.project_type == ProjectType::Modpack && self.target.is_none() {
+            row = row.child(
+                pill("f-installed".into(), "Hide installed", self.hide_installed).on_click(
+                    cx.listener(|this, _: &ClickEvent, _, cx| {
+                        this.hide_installed = !this.hide_installed;
+                        cx.notify();
+                    }),
+                ),
+            );
+        }
+
+        // Categories for this kind of project.
+        let kind = self.query.project_type.as_str();
+        let mut cats = div().flex().flex_wrap().gap(space(1.0));
+        for (name, _) in self.categories.iter().filter(|(_, t)| t == kind) {
+            let active = self.query.categories.iter().any(|c| c == name);
+            let key = name.clone();
+            cats = cats.child(
+                div()
+                    .id(SharedString::from(format!("cat-{name}")))
+                    .h(px(24.0))
+                    .px(space(2.0))
+                    .flex()
+                    .items_center()
+                    .rounded(px(radius::SM))
+                    .border_1()
+                    .text_size(px(type_scale::CAPTION))
+                    .cursor_pointer()
+                    .when(active, |d| {
+                        d.border_color(p.accent)
+                            .bg(p.accent_soft)
+                            .text_color(p.text)
+                    })
+                    .when(!active, |d| {
+                        d.border_color(p.border)
+                            .text_color(p.text_secondary)
+                            .hover(|s| s.bg(p.hover))
+                    })
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        this.toggle_category(&key, cx)
+                    }))
+                    .child(title_case(name)),
+            );
+        }
+        div()
+            .flex()
+            .flex_col()
+            .gap(space(2.5))
+            .child(row)
+            .child(cats)
     }
 
     fn sort_row(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -438,6 +602,23 @@ impl DiscoverPage {
             .as_deref()
             .and_then(|url| Images::get(url, 128, cx));
         let mut tags = div().flex().gap(space(1.5)).flex_wrap();
+        if self.query.project_type == ProjectType::Modpack
+            && self.installed_packs.contains(&hit.project_id)
+        {
+            tags = tags.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(space(1.0))
+                    .px(space(1.5))
+                    .rounded(px(radius::SM))
+                    .bg(p.running_soft)
+                    .text_size(px(type_scale::CAPTION))
+                    .text_color(p.running)
+                    .child(icon("check", 11.0, p.running))
+                    .child("In your library"),
+            );
+        }
         if let Some(v) = hit.newest_game_version() {
             tags = tags.child(chip(v.to_string(), cx));
         }
@@ -705,8 +886,15 @@ impl Render for DiscoverPage {
                 ));
             }
             Some(Ok(results)) => {
-                let hits = results.hits.clone();
-                more = (hits.len() as u32) < results.total_hits;
+                more = (results.hits.len() as u32) < results.total_hits;
+                let hits: Vec<SearchHit> = results
+                    .hits
+                    .iter()
+                    .filter(|h| {
+                        !self.hide_installed || !self.installed_packs.contains(&h.project_id)
+                    })
+                    .cloned()
+                    .collect();
                 for (ix, hit) in hits.iter().enumerate() {
                     list = list.child(self.result_row(ix, hit, cx));
                 }

@@ -173,6 +173,14 @@ impl SearchQuery {
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
+pub struct Category {
+    pub name: String,
+    pub project_type: String,
+    /// "categories", "features", "resolutions"…
+    pub header: String,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
 pub struct SearchHit {
     pub project_id: String,
     pub project_type: String,
@@ -404,6 +412,17 @@ impl Client {
             .http
             .get(format!("{}/search", self.base))
             .query(&query.params())
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(response.json().await?)
+    }
+
+    /// Every category Modrinth uses, for all project types.
+    pub async fn categories(&self) -> anyhow::Result<Vec<Category>> {
+        let response = self
+            .http
+            .get(format!("{}/tag/category", self.base))
             .send()
             .await?
             .error_for_status()?;
