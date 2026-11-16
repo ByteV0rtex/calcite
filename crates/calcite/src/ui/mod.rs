@@ -6,6 +6,7 @@ pub mod instance_settings;
 pub mod look;
 pub mod onboarding;
 pub mod pages;
+pub mod palette;
 pub mod profile_editor;
 pub mod rename_world;
 pub mod server_dialog;

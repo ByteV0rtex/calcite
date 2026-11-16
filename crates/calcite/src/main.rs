@@ -152,6 +152,24 @@ fn main() {
                 .expect("open the main window");
             cx.activate(true);
 
+            // ⌘K / Ctrl+K opens the command palette from anywhere.
+            cx.bind_keys([gpui_kit::KeyBinding::new(
+                if cfg!(target_os = "macos") {
+                    "cmd-k"
+                } else {
+                    "ctrl-k"
+                },
+                ui::shell::TogglePalette,
+                None,
+            )]);
+            cx.on_action(move |_: &ui::shell::TogglePalette, cx| {
+                let _ = window.update(cx, |root, window, cx| {
+                    if let Ok(shell) = root.view().clone().downcast::<Shell>() {
+                        shell.update(cx, |s, cx| s.toggle_palette(window, cx));
+                    }
+                });
+            });
+
             if let Some((page, out, _)) = snapshot.clone() {
                 take_snapshot(window.into(), page, out, cx);
             }
@@ -285,6 +303,13 @@ fn take_snapshot(window: gpui_kit::AnyWindowHandle, page: String, out: String, c
                         }
                         if let Some(text) = word.strip_prefix("search=") {
                             shell.type_search(text, window, cx);
+                        }
+                        if word == "palette" {
+                            shell.toggle_palette(window, cx);
+                        }
+                        if let Some(text) = word.strip_prefix("palette=") {
+                            shell.toggle_palette(window, cx);
+                            shell.palette_query(text, window, cx);
                         }
                         if word == "edit-profile" {
                             shell.open_profile_editor(window, cx);

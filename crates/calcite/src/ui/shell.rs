@@ -25,6 +25,10 @@ use crate::ui::pages::settings::{self, Section as SettingsSection};
 use crate::ui::pages::{discover::DiscoverPage, gallery, home, library};
 use theseus::install::InstallJobStatus;
 
+use crate::ui::palette::{CommandPalette, PaletteCommand, PaletteEvent};
+
+gpui_kit::actions!(calcite, [TogglePalette]);
+
 /// Width of the left sidebar.
 pub const SIDEBAR_WIDTH: f32 = 228.0;
 /// Height of the window title bar (macOS traffic lights are centered on it).
@@ -152,6 +156,8 @@ pub struct Shell {
     /// Only alive while Skins is open (it holds rendered thumbnails).
     skins: Option<Entity<crate::ui::pages::skins::SkinsPage>>,
     dialog: Option<gpui_kit::AnyView>,
+    /// The ⌘K command palette, while it's open.
+    palette: Option<Entity<CommandPalette>>,
     pub library_filter: Entity<InputState>,
     /// The title bar search field.
     global_search: Entity<InputState>,
@@ -228,6 +234,7 @@ impl Shell {
             skins: None,
             screenshots: None,
             dialog: None,
+            palette: None,
             library_filter,
             global_search,
             pending_change_version: None,
@@ -564,8 +571,68 @@ impl Shell {
         cx.notify();
     }
 
-    /// Dev hook: type into the title bar search.
+    /// Open the ⌘K palette, or close it if it's open.
+    pub fn toggle_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.palette.take().is_some() {
+            cx.notify();
+            return;
+        }
+        let palette = cx.new(|cx| CommandPalette::new(window, cx));
+        cx.subscribe_in(
+            &palette,
+            window,
+            |this, _, event: &PaletteEvent, window, cx| {
+                match event {
+                    PaletteEvent::Close => this.palette = None,
+                    PaletteEvent::Run(command) => this.run_palette(command.clone(), window, cx),
+                }
+                cx.notify();
+            },
+        )
+        .detach();
+        self.palette = Some(palette);
+        cx.notify();
+    }
+
+    /// Dev hook: type into the open palette.
     #[cfg_attr(not(feature = "snapshot"), allow(dead_code))]
+    pub fn palette_query(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(palette) = &self.palette {
+            palette.update(cx, |p, cx| p.set_query(text, window, cx));
+        }
+    }
+
+    fn run_palette(
+        &mut self,
+        command: PaletteCommand,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match command {
+            PaletteCommand::Go(route) => self.navigate(route, window, cx),
+            PaletteCommand::Play(id) => self.state.update(cx, |s, cx| s.play(&id, cx)),
+            PaletteCommand::OpenFolder(id) => {
+                let fetch = crate::backend::Backend::global(cx)
+                    .call(async move { theseus::instance::get_full_path(&id).await });
+                cx.spawn(async move |_, cx| {
+                    if let Ok(path) = fetch.await {
+                        cx.update(|cx| cx.open_with_system(&path));
+                    }
+                })
+                .detach();
+            }
+            PaletteCommand::NewInstance => self.open_create_dialog(window, cx),
+            PaletteCommand::FindServer => self.open_servers(window, cx),
+            PaletteCommand::SearchModrinth(text) => self.type_search(&text, window, cx),
+            PaletteCommand::OpenDataFolder => {
+                if let Some(dir) = crate::backend::data_dir() {
+                    cx.open_with_system(&dir);
+                }
+            }
+        }
+    }
+
+    /// Search Modrinth for `text` from the title bar.
     pub fn type_search(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.global_search
             .update(cx, |s, cx| s.set_value(text.to_string(), window, cx));
@@ -793,6 +860,27 @@ impl Shell {
                                 .cleanable(true)
                                 .small(),
                         ),
+                    )
+                    .child(
+                        div()
+                            .id("palette-hint")
+                            .flex_none()
+                            .px(space(1.5))
+                            .rounded(px(4.0))
+                            .border_1()
+                            .border_color(p.border)
+                            .text_size(px(type_scale::CAPTION))
+                            .text_color(p.text_muted)
+                            .cursor_pointer()
+                            .hover(|s| s.text_color(p.text).bg(p.hover))
+                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                                this.toggle_palette(window, cx)
+                            }))
+                            .child(if cfg!(target_os = "macos") {
+                                "⌘K"
+                            } else {
+                                "Ctrl K"
+                            }),
                     ),
             )
             .child(
@@ -1607,6 +1695,29 @@ impl Render for Shell {
                             .children(notice),
                     ),
             )
+            .when_some(self.palette.clone(), |d, palette| {
+                d.child(
+                    div()
+                        .id("palette-scrim")
+                        .absolute()
+                        .inset_0()
+                        .bg(p.scrim)
+                        .occlude()
+                        .flex()
+                        .justify_center()
+                        .pt(px(96.0))
+                        .child(
+                            div()
+                                .on_mouse_down_out(cx.listener(
+                                    |this, _: &gpui_kit::MouseDownEvent, _, cx| {
+                                        this.palette = None;
+                                        cx.notify();
+                                    },
+                                ))
+                                .child(palette),
+                        ),
+                )
+            })
             .when_some(dialog, |d, dialog| {
                 d.child(
                     div()
