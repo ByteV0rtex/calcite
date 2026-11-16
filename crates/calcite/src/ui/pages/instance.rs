@@ -174,6 +174,15 @@ pub struct InstancePage {
     pack_confirm: Option<PackConfirm>,
     /// Filters the content list.
     query: Entity<InputState>,
+    /// The log being shown: the live one (None) or a saved file.
+    log_file: Option<(theseus::logs::LogType, String)>,
+    /// Saved logs and crash reports, newest first.
+    log_files: Option<Vec<(theseus::logs::LogType, String)>>,
+    old_log: Option<Result<Vec<LogLine>, String>>,
+    log_query: Entity<InputState>,
+    /// Only lines of this level (None: all).
+    log_level: Option<LogLevel>,
+    sharing_log: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -184,11 +193,19 @@ impl InstancePage {
     pub fn new(id: String, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let state = AppState::global(cx);
         let query = cx.new(|cx| InputState::new(window, cx).placeholder("Search content"));
-        let mut subscriptions = vec![cx.subscribe(&query, |_, _, event: &InputEvent, cx| {
-            if let InputEvent::Change = event {
-                cx.notify();
-            }
-        })];
+        let log_query = cx.new(|cx| InputState::new(window, cx).placeholder("Search the log"));
+        let mut subscriptions = vec![
+            cx.subscribe(&query, |_, _, event: &InputEvent, cx| {
+                if let InputEvent::Change = event {
+                    cx.notify();
+                }
+            }),
+            cx.subscribe(&log_query, |_, _, event: &InputEvent, cx| {
+                if let InputEvent::Change = event {
+                    cx.notify();
+                }
+            }),
+        ];
         subscriptions.push(cx.observe(&state, |this, state, cx| {
             // Reload content whenever the backend says it changed.
             let revision = state
@@ -233,6 +250,12 @@ impl InstancePage {
             pack_open: false,
             pack_confirm: None,
             query,
+            log_file: None,
+            log_files: None,
+            old_log: None,
+            log_query,
+            log_level: None,
+            sharing_log: false,
             _subscriptions: subscriptions,
         };
         page.load_content(cx);
@@ -552,6 +575,15 @@ impl InstancePage {
         match word {
             "dev-switch-pack" => cx.emit(InstancePageEvent::PickVersion(self.id.clone(), None)),
             "dev-pack-files" => self.pack_open = true,
+            "dev-open-log" => {
+                let first = self.log_files.as_ref().and_then(|f| {
+                    f.iter()
+                        .find(|(k, _)| *k == theseus::logs::LogType::InfoLog)
+                        .cloned()
+                });
+                self.open_log(first, cx);
+            }
+            "dev-errors" => self.log_level = Some(LogLevel::Error),
             "dev-freeze-update" => {
                 // Freeze the first row that has an update waiting.
                 let path = self
@@ -610,6 +642,7 @@ impl InstancePage {
         self.tab = tab;
         match tab {
             Tab::Worlds => self.load_worlds(cx),
+            Tab::Logs => self.load_log_files(cx),
             Tab::Health => self.load_health(cx),
             Tab::Screenshots => self.load_shots(cx),
             Tab::Snapshots => self.load_snapshots(cx),
@@ -1071,6 +1104,151 @@ impl InstancePage {
             }));
         }
         menu
+    }
+
+    /// The saved logs and crash reports, for the picker.
+    fn load_log_files(&mut self, cx: &mut Context<Self>) {
+        let id = self.id.clone();
+        let fetch =
+            Backend::global(cx).call(async move { theseus::logs::get_logs(&id, Some(true)).await });
+        cx.spawn(async move |this, cx| {
+            let files = fetch.await.unwrap_or_default();
+            let _ = this.update(cx, |this, cx| {
+                this.log_files = Some(
+                    files
+                        .into_iter()
+                        .filter(|l| l.filename != "latest.log")
+                        .map(|l| (l.log_type, l.filename))
+                        .collect(),
+                );
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Show a saved log (or, with None, the live one).
+    fn open_log(&mut self, file: Option<(theseus::logs::LogType, String)>, cx: &mut Context<Self>) {
+        self.log_file = file.clone();
+        self.old_log = None;
+        cx.notify();
+        let Some((kind, name)) = file else {
+            return;
+        };
+        let id = self.id.clone();
+        let fetch = Backend::global(cx)
+            .call(async move { theseus::logs::get_output_by_filename(&id, kind, &name).await });
+        cx.spawn(async move |this, cx| {
+            let result = fetch.await;
+            let _ = this.update(cx, |this, cx| {
+                this.old_log = Some(
+                    result
+                        .map(|text| {
+                            let text = serde_json::to_value(&text)
+                                .ok()
+                                .and_then(|v| v.as_str().map(str::to_string))
+                                .unwrap_or_default();
+                            // Stack traces and other untimed lines belong
+                            // to the line above them.
+                            let mut lines: Vec<LogLine> =
+                                text.lines().map(parse_legacy_line).collect();
+                            for ix in 1..lines.len() {
+                                if lines[ix].time.is_empty() {
+                                    lines[ix].level = lines[ix - 1].level.clone();
+                                }
+                            }
+                            lines
+                        })
+                        .map_err(|e| format!("{e:#}")),
+                );
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// The log being shown, as plain text.
+    fn log_text(&self, cx: &App) -> String {
+        let join = |lines: &mut dyn Iterator<Item = &LogLine>| {
+            lines
+                .map(|l| {
+                    if l.time.is_empty() {
+                        l.text.to_string()
+                    } else {
+                        format!("[{}] {}", l.time, l.text)
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        match (&self.log_file, &self.old_log) {
+            (Some(_), Some(Ok(lines))) => join(&mut lines.iter()),
+            (Some(_), _) => String::new(),
+            (None, _) => self
+                .state
+                .read(cx)
+                .logs
+                .get(&self.id)
+                .map(|b| join(&mut b.iter()))
+                .unwrap_or_default(),
+        }
+    }
+
+    /// Upload the log to mclo.gs and copy the link.
+    fn share_log(&mut self, cx: &mut Context<Self>) {
+        let text = self.log_text(cx);
+        if text.trim().is_empty() || self.sharing_log {
+            return;
+        }
+        self.sharing_log = true;
+        cx.notify();
+        let upload = Backend::global(cx).run(async move {
+            let http = reqwest::Client::builder()
+                .user_agent(concat!("Calcite/", env!("CARGO_PKG_VERSION")))
+                .build()?;
+            calcite_core::paste::mclogs(&http, &text).await
+        });
+        cx.spawn(async move |this, cx| {
+            let result = upload.await.and_then(|r| r);
+            let _ = this.update(cx, |this, cx| {
+                this.sharing_log = false;
+                this.state.update(cx, |state, cx| {
+                    match result {
+                        Ok(url) => {
+                            cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(url.clone()));
+                            state.notice = Some(crate::state::Notice {
+                                title: "Link copied".into(),
+                                body: format!("The log is at {url}").into(),
+                                is_error: false,
+                            });
+                        }
+                        Err(error) => {
+                            state.notify_error("Couldn't share the log", format!("{error:#}"))
+                        }
+                    }
+                    cx.notify();
+                });
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn open_logs_folder(&mut self, cx: &mut Context<Self>) {
+        let id = self.id.clone();
+        let crash = matches!(
+            self.log_file,
+            Some((theseus::logs::LogType::CrashReport, _))
+        );
+        let fetch =
+            Backend::global(cx).call(async move { theseus::instance::get_full_path(&id).await });
+        cx.spawn(async move |_, cx| {
+            if let Ok(path) = fetch.await {
+                let dir = path.join(if crash { "crash-reports" } else { "logs" });
+                cx.update(|cx| cx.open_with_system(if dir.exists() { &dir } else { &path }));
+            }
+        })
+        .detach();
     }
 
     /// Lines the game printed earlier in this session (before this page opened).
@@ -1903,14 +2081,97 @@ impl InstancePage {
 
     fn logs_tab(&self, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
         let p = cx.palette().clone();
-        let lines: Vec<LogLine> = self
-            .state
-            .read(cx)
-            .logs
-            .get(&self.id)
-            .map(|b| b.iter().cloned().collect())
-            .unwrap_or_default();
+        let live = self.log_file.is_none();
+        let all: Vec<LogLine> = match (&self.log_file, &self.old_log) {
+            (None, _) => self
+                .state
+                .read(cx)
+                .logs
+                .get(&self.id)
+                .map(|b| b.iter().cloned().collect())
+                .unwrap_or_default(),
+            (Some(_), Some(Ok(lines))) => lines.clone(),
+            (Some(_), _) => Vec::new(),
+        };
         let running = self.state.read(cx).running.contains_key(&self.id);
+        let query = self.log_query.read(cx).value().trim().to_lowercase();
+        let count = |level: &LogLevel| all.iter().filter(|l| l.level == *level).count();
+        let (errors, warnings) = (count(&LogLevel::Error), count(&LogLevel::Warn));
+        let lines: Vec<LogLine> = all
+            .iter()
+            .filter(|l| self.log_level.as_ref().is_none_or(|lv| l.level == *lv))
+            .filter(|l| query.is_empty() || l.text.to_lowercase().contains(&query))
+            .cloned()
+            .collect();
+
+        // Which log: live, or one of the saved files.
+        let source_label: SharedString = match &self.log_file {
+            None => if running { "Live" } else { "This session" }.into(),
+            Some((kind, name)) => log_label(*kind, name).into(),
+        };
+        let files = self.log_files.clone().unwrap_or_default();
+        let page = cx.entity().downgrade();
+        let picker = KitButton::new("log-source")
+            .small()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(space(1.5))
+                    .child(icon(
+                        if live { "square-terminal" } else { "file-text" },
+                        13.0,
+                        p.text_secondary,
+                    ))
+                    .child(source_label)
+                    .child(icon("chevron-down", 12.0, p.text_muted)),
+            )
+            .dropdown_menu(move |menu, _, _| {
+                let open = page.clone();
+                let mut menu = menu.item(PopupMenuItem::new("Live log").checked(false).on_click(
+                    move |_, _, cx| {
+                        let _ = open.update(cx, |this, cx| this.open_log(None, cx));
+                    },
+                ));
+                if !files.is_empty() {
+                    menu = menu.separator();
+                }
+                for (kind, name) in files.iter().take(40) {
+                    let open = page.clone();
+                    let file = (*kind, name.clone());
+                    menu = menu.item(PopupMenuItem::new(log_label(*kind, name)).on_click(
+                        move |_, _, cx| {
+                            let file = file.clone();
+                            let _ = open.update(cx, |this, cx| this.open_log(Some(file), cx));
+                        },
+                    ));
+                }
+                menu
+            });
+
+        let level_chip =
+            |key: &'static str, label: String, level: Option<LogLevel>, cx: &mut Context<Self>| {
+                let active = self.log_level == level;
+                div()
+                    .id(key)
+                    .h(px(26.0))
+                    .px(space(2.5))
+                    .flex()
+                    .items_center()
+                    .rounded(px(radius::SM))
+                    .text_size(px(type_scale::SMALL))
+                    .cursor_pointer()
+                    .when(active, |d| d.bg(p.raised).text_color(p.text))
+                    .when(!active, |d| {
+                        d.text_color(p.text_secondary)
+                            .hover(|s| s.text_color(p.text))
+                    })
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        this.log_level = level.clone();
+                        cx.notify();
+                    }))
+                    .child(label)
+            };
 
         let toolbar = div()
             .flex()
@@ -1918,64 +2179,115 @@ impl InstancePage {
             .gap(space(2.0))
             .px(space(8.0))
             .pt(space(4.0))
-            .child(chip(if running { "Live" } else { "This session" }, cx))
-            .child(
-                div()
-                    .text_size(px(type_scale::SMALL))
-                    .text_color(p.text_muted)
-                    .child(format!("{} lines", lines.len())),
-            )
+            .child(picker)
+            .child(level_chip(
+                "log-all",
+                format!("All {}", all.len()),
+                None,
+                cx,
+            ))
+            .child(level_chip(
+                "log-errors",
+                format!("Errors {errors}"),
+                Some(LogLevel::Error),
+                cx,
+            ))
+            .child(level_chip(
+                "log-warnings",
+                format!("Warnings {warnings}"),
+                Some(LogLevel::Warn),
+                cx,
+            ))
+            .child(level_chip(
+                "log-info",
+                "Info".into(),
+                Some(LogLevel::Info),
+                cx,
+            ))
             .child(div().flex_1())
             .child(
-                Button::new("follow-logs")
-                    .icon("arrow-down-to-line")
-                    .label(if self.follow_logs {
-                        "Following"
-                    } else {
-                        "Follow"
-                    })
-                    .small()
-                    .ghost()
-                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                        this.follow_logs = !this.follow_logs;
-                        cx.notify();
-                    })),
+                div()
+                    .w(px(200.0))
+                    .child(Input::new(&self.log_query).small().cleanable(true)),
             )
-            .child(
-                Button::new("copy-logs")
-                    .icon("copy")
-                    .label("Copy")
+            .when(live, |d| {
+                d.child(
+                    Button::new("follow-logs")
+                        .icon("arrow-down-to-line")
+                        .label(if self.follow_logs {
+                            "Following"
+                        } else {
+                            "Follow"
+                        })
+                        .small()
+                        .ghost()
+                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                            this.follow_logs = !this.follow_logs;
+                            cx.notify();
+                        })),
+                )
+            })
+            .child({
+                let page = cx.entity().downgrade();
+                KitButton::new("log-more")
+                    .ghost()
                     .small()
-                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                        let text = this
-                            .state
-                            .read(cx)
-                            .logs
-                            .get(&this.id)
-                            .map(|b| {
-                                b.iter()
-                                    .map(|l| format!("[{}] {}", l.time, l.text))
-                                    .collect::<Vec<_>>()
-                                    .join("\n")
-                            })
-                            .unwrap_or_default();
-                        cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(text));
-                    })),
-            );
+                    .child(icon("ellipsis", 14.0, p.text_secondary))
+                    .dropdown_menu(move |menu, _, _| {
+                        let (a, b, c, d) = (page.clone(), page.clone(), page.clone(), page.clone());
+                        let mut menu = menu
+                            .item(PopupMenuItem::new("Copy").on_click(move |_, _, cx| {
+                                let _ = a.update(cx, |this, cx| {
+                                    let text = this.log_text(cx);
+                                    cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(
+                                        text,
+                                    ));
+                                });
+                            }))
+                            .item(PopupMenuItem::new("Share as a link (mclo.gs)").on_click(
+                                move |_, _, cx| {
+                                    let _ = b.update(cx, |this, cx| this.share_log(cx));
+                                },
+                            ))
+                            .item(PopupMenuItem::new("Open logs folder").on_click(
+                                move |_, _, cx| {
+                                    let _ = c.update(cx, |this, cx| this.open_logs_folder(cx));
+                                },
+                            ));
+                        if live {
+                            menu = menu.separator().item(PopupMenuItem::new("Clear").on_click(
+                                move |_, _, cx| {
+                                    let _ = d.update(cx, |this, cx| {
+                                        let id = this.id.clone();
+                                        this.state.update(cx, |s, cx| {
+                                            s.logs.remove(&id);
+                                            cx.notify();
+                                        });
+                                    });
+                                },
+                            ));
+                        }
+                        menu
+                    })
+            });
 
-        if lines.is_empty() {
+        let empty: Option<(&'static str, String)> = match (&self.log_file, &self.old_log) {
+            (Some(_), None) => Some(("Opening the log…", String::new())),
+            (Some(_), Some(Err(error))) => Some(("Couldn't open that log", error.clone())),
+            _ if all.is_empty() => Some((
+                "No output yet",
+                "Press Play and the game's log appears here as it runs. Older logs and crash reports are in the menu on the left.".into(),
+            )),
+            _ if lines.is_empty() => Some(("No lines match", "Try another search or level.".into())),
+            _ => None,
+        };
+        if let Some((title, body)) = empty {
             return div()
                 .size_full()
                 .flex()
                 .flex_col()
                 .child(toolbar)
-                .child(empty_state(
-                    "square-terminal",
-                    "No output yet",
-                    "Press Play and the game's log appears here as it runs.",
-                    None,
-                    cx,
-                ))
+                .child(empty_state("square-terminal", title, body, None, cx))
                 .into_any_element();
         }
 
@@ -1998,6 +2310,7 @@ impl InstancePage {
                     };
                     div()
                         .id(ix)
+                        .w_full()
                         .flex()
                         .gap(space(3.0))
                         .h(px(20.0))
@@ -2050,6 +2363,31 @@ impl InstancePage {
                     .child(list),
             )
             .into_any_element()
+    }
+}
+
+/// "Crash · Nov 15, 2026 14:02" / "Log · 2026-11-15 #2" style labels.
+fn log_label(kind: theseus::logs::LogType, name: &str) -> String {
+    let stem = name
+        .trim_end_matches(".gz")
+        .trim_end_matches(".log")
+        .trim_end_matches(".txt");
+    match kind {
+        theseus::logs::LogType::CrashReport => {
+            let when = stem
+                .trim_start_matches("crash-")
+                .trim_end_matches("-client")
+                .trim_end_matches("-server")
+                .replacen('_', " ", 1)
+                .replace('.', ":");
+            format!("Crash · {when}")
+        }
+        theseus::logs::LogType::InfoLog => match stem.rsplit_once('-') {
+            Some((date, n)) if n.chars().all(|c| c.is_ascii_digit()) => {
+                format!("Log · {date} #{n}")
+            }
+            _ => format!("Log · {stem}"),
+        },
     }
 }
 
