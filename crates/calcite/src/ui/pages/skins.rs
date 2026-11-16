@@ -362,6 +362,12 @@ impl SkinsPage {
                 this.busy = false;
                 if let Err(error) = result {
                     this.tell_error(failure, format!("{error:#}"), cx);
+                } else {
+                    // The avatar shows the skin's face: refresh it.
+                    AppState::global(cx).update(cx, |s, cx| {
+                        s.face = None;
+                        s.load_face(cx);
+                    });
                 }
                 this.load(cx);
             });
@@ -718,7 +724,19 @@ impl SkinsPage {
             .map(|n| n.to_string())
             .unwrap_or_else(|| {
                 if is_custom(skin) {
-                    "Your skin".into()
+                    // Number saved skins so they can be told apart.
+                    let number = self
+                        .skins
+                        .as_ref()
+                        .and_then(|r| r.as_ref().ok())
+                        .map(|all| {
+                            all.iter()
+                                .filter(|s| is_custom(s) && s.name.is_none())
+                                .position(|s| id_of(s) == id_of(skin))
+                                .map_or(1, |n| n + 1)
+                        })
+                        .unwrap_or(1);
+                    format!("Saved skin {number}")
                 } else {
                     "Skin".into()
                 }

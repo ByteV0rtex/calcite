@@ -2318,7 +2318,11 @@ impl InstancePage {
         let running = self.state.read(cx).running.contains_key(&self.id);
         let query = self.log_query.read(cx).value().trim().to_lowercase();
         let count = |level: &LogLevel| all.iter().filter(|l| l.level == *level).count();
-        let (errors, warnings) = (count(&LogLevel::Error), count(&LogLevel::Warn));
+        let (errors, warnings, infos) = (
+            count(&LogLevel::Error),
+            count(&LogLevel::Warn),
+            count(&LogLevel::Info),
+        );
         let lines: Vec<LogLine> = all
             .iter()
             .filter(|l| self.log_level.as_ref().is_none_or(|lv| l.level == *lv))
@@ -2422,7 +2426,7 @@ impl InstancePage {
             ))
             .child(level_chip(
                 "log-info",
-                "Info".into(),
+                format!("Info {infos}"),
                 Some(LogLevel::Info),
                 cx,
             ))

@@ -201,6 +201,32 @@ impl Cuboid {
 /// Bring a skin to the 64×64 layout. Old 64×32 skins get mirrored copies of
 /// the right arm and leg, the way Minecraft does it. `None` if it isn't a
 /// skin texture.
+/// The player's face (with the hat layer on top), `size`×`size` with crisp
+/// pixels, for avatars. Takes a normalized 64×64 skin.
+pub fn face(skin: &RgbaImage, size: u32) -> RgbaImage {
+    let mut face = RgbaImage::new(8, 8);
+    for y in 0..8 {
+        for x in 0..8 {
+            let base = *skin.get_pixel(8 + x, 8 + y);
+            let hat = *skin.get_pixel(40 + x, 8 + y);
+            // Blend the hat over the face by its alpha.
+            let a = hat[3] as u32;
+            let mix = |b: u8, h: u8| ((h as u32 * a + b as u32 * (255 - a)) / 255) as u8;
+            face.put_pixel(
+                x,
+                y,
+                image::Rgba([
+                    mix(base[0], hat[0]),
+                    mix(base[1], hat[1]),
+                    mix(base[2], hat[2]),
+                    255,
+                ]),
+            );
+        }
+    }
+    image::imageops::resize(&face, size, size, image::imageops::FilterType::Nearest)
+}
+
 pub fn normalize(skin: &RgbaImage) -> Option<RgbaImage> {
     match skin.dimensions() {
         (64, 64) => Some(skin.clone()),
@@ -454,6 +480,27 @@ pub fn render_with(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn face_puts_the_hat_over_the_face() {
+        let mut skin = RgbaImage::from_pixel(64, 64, image::Rgba([0, 0, 0, 0]));
+        // Face pixel (0,0) is red; the hat pixel above it is half-transparent blue.
+        skin.put_pixel(8, 8, image::Rgba([255, 0, 0, 255]));
+        skin.put_pixel(40, 8, image::Rgba([0, 0, 255, 128]));
+        // Another face pixel with no hat on it stays as it is.
+        skin.put_pixel(9, 8, image::Rgba([0, 255, 0, 255]));
+        let face = super::face(&skin, 16);
+        assert_eq!(face.dimensions(), (16, 16));
+        let blended = face.get_pixel(0, 0);
+        assert!(blended[0] > 100 && blended[2] > 100, "{blended:?}");
+        assert_eq!(*face.get_pixel(2, 0), image::Rgba([0, 255, 0, 255]));
+        assert_eq!(
+            face.get_pixel(1, 1),
+            face.get_pixel(0, 0),
+            "pixels stay crisp"
+        );
+    }
+
     use super::*;
 
     /// A skin with each body part's front a different color.

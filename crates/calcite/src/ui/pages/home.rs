@@ -17,11 +17,18 @@ pub fn render(shell: &mut Shell, window: &mut Window, cx: &mut Context<Shell>) -
     let accounts = state.accounts.len();
 
     if instances.is_empty() {
+        let popular = popular_section(shell, cx);
         return div()
+            .id("home-scroll")
             .size_full()
+            .overflow_y_scroll()
             .flex()
+            .flex_col()
             .items_center()
             .justify_center()
+            .gap(space(8.0))
+            .px(space(8.0))
+            .py(space(7.0))
             .child(empty_state(
                 "house",
                 "Welcome to Calcite",
@@ -63,6 +70,7 @@ pub fn render(shell: &mut Shell, window: &mut Window, cx: &mut Context<Shell>) -
                 ),
                 cx,
             ))
+            .children(popular.map(|p| div().w_full().max_w(px(1120.0)).child(p)))
             .into_any_element();
     }
 
@@ -330,7 +338,145 @@ pub fn render(shell: &mut Shell, window: &mut Window, cx: &mut Context<Shell>) -
                         .child(stat("Instances", instances.len().to_string()))
                         .child(stat("Modded", modded.to_string()))
                         .child(stat("Running now", running.len().to_string())),
-                ),
+                )
+                .children(popular_section(shell, cx)),
         )
         .into_any_element()
+}
+
+/// The most downloaded modpacks on Modrinth, four across.
+fn popular_section(shell: &mut Shell, cx: &mut Context<Shell>) -> Option<AnyElement> {
+    let p = cx.palette().clone();
+    let hits = shell.state().read(cx).popular.clone()?;
+    if hits.is_empty() {
+        return None;
+    }
+    let mut row = div().flex().gap(space(3.0));
+    for (ix, hit) in hits.into_iter().take(4).enumerate() {
+        let source = hit
+            .icon_url
+            .as_deref()
+            .and_then(|url| crate::images::Images::get(url, 96, cx));
+        let project = hit.project_id.clone();
+        let install = hit.latest_version.clone().map(|version| {
+            (
+                hit.project_id.clone(),
+                version,
+                hit.title.clone(),
+                hit.icon_url.clone(),
+            )
+        });
+        row = row.child(
+            div()
+                .id(SharedString::from(format!("popular-{ix}")))
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .gap(space(3.0))
+                .p(space(4.0))
+                .rounded(px(radius::LG))
+                .bg(p.surface)
+                .border_1()
+                .border_color(p.border)
+                .cursor_pointer()
+                .hover(|s| s.border_color(p.border_strong))
+                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                    this.navigate(Route::Project(project.clone(), None), window, cx)
+                }))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(space(3.0))
+                        .child(thumb(source, &hit.title, 44.0, radius::MD, cx))
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .min_w_0()
+                                .child(
+                                    div()
+                                        .truncate()
+                                        .text_size(px(type_scale::BODY))
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(p.text)
+                                        .child(hit.title.clone()),
+                                )
+                                .child(
+                                    div()
+                                        .truncate()
+                                        .text_size(px(type_scale::SMALL))
+                                        .text_color(p.text_muted)
+                                        .child(format!("by {}", hit.author)),
+                                ),
+                        ),
+                )
+                .child(
+                    div()
+                        .h(px(34.0))
+                        .overflow_hidden()
+                        .text_size(px(type_scale::SMALL))
+                        .line_height(px(17.0))
+                        .text_color(p.text_secondary)
+                        .child(hit.description.clone()),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(space(2.0))
+                        .child(crate::ui::components::icon("download", 13.0, p.text_muted))
+                        .child(
+                            div()
+                                .flex_1()
+                                .text_size(px(type_scale::SMALL))
+                                .text_color(p.text_muted)
+                                .child(crate::ui::components::compact_number(hit.downloads)),
+                        )
+                        .children(install.map(|(project, version, title, icon_url)| {
+                            Button::new(SharedString::from(format!("popular-install-{ix}")))
+                                .icon("arrow-down-to-line")
+                                .label("Install")
+                                .small()
+                                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                    cx.stop_propagation();
+                                    let (project, version, title, icon_url) = (
+                                        project.clone(),
+                                        version.clone(),
+                                        title.clone(),
+                                        icon_url.clone(),
+                                    );
+                                    this.state().update(cx, |s, cx| {
+                                        s.install_modpack(project, version, title, icon_url, cx)
+                                    });
+                                }))
+                        })),
+                ),
+        );
+    }
+    Some(
+        div()
+            .flex()
+            .flex_col()
+            .gap(space(3.0))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(section_heading("Popular modpacks", cx))
+                    .child(
+                        Button::new("home-popular-more")
+                            .label("See all")
+                            .small()
+                            .ghost()
+                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                                this.navigate(Route::Discover, window, cx)
+                            })),
+                    ),
+            )
+            .child(row)
+            .into_any_element(),
+    )
 }

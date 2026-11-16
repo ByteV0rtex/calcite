@@ -524,7 +524,7 @@ pub fn short_duration(seconds: u64) -> String {
     let h = seconds / 3600;
     let m = (seconds % 3600) / 60;
     match (h, m) {
-        (0, 0) => "under a minute".into(),
+        (0, 0) => "<1m".into(),
         (0, m) => format!("{m}m"),
         (h, 0) => format!("{h}h"),
         (h, m) => format!("{h}h {m}m"),
@@ -577,7 +577,7 @@ mod tests {
 
     #[test]
     fn durations_are_short() {
-        assert_eq!(short_duration(30), "under a minute");
+        assert_eq!(short_duration(30), "<1m");
         assert_eq!(short_duration(45 * 60), "45m");
         assert_eq!(short_duration(3 * 3600), "3h");
         assert_eq!(short_duration(3 * 3600 + 12 * 60), "3h 12m");

@@ -9,6 +9,8 @@ use crate::theme::{Accent, Appearance};
 #[serde(default)]
 pub struct Prefs {
     pub appearance: Appearance,
+    /// Light or dark following the system, instead of `appearance`.
+    pub follow_system: bool,
     pub accent: Accent,
     pub onboarding_done: bool,
     /// Back up the worlds you played when the game closes.
@@ -34,6 +36,7 @@ impl Default for Prefs {
     fn default() -> Self {
         Prefs {
             appearance: Appearance::default(),
+            follow_system: false,
             accent: Accent::default(),
             onboarding_done: false,
             backup_worlds_on_exit: true,
@@ -72,13 +75,44 @@ impl Prefs {
         }
     }
 
-    /// Change the look, apply it everywhere, and remember it.
+    /// Change the look, apply it everywhere, and remember it. Picking a
+    /// fixed appearance stops following the system.
     pub fn set_look(appearance: Appearance, accent: Accent, cx: &mut gpui_kit::App) {
         let prefs = cx.global_mut::<Prefs>();
         prefs.appearance = appearance;
+        prefs.follow_system = false;
         prefs.accent = accent;
         prefs.save();
         crate::theme::apply(appearance, accent, cx);
+    }
+
+    /// Keep the accent but switch light and dark with the system.
+    pub fn set_follow_system(accent: Accent, cx: &mut gpui_kit::App) {
+        let prefs = cx.global_mut::<Prefs>();
+        prefs.follow_system = true;
+        prefs.accent = accent;
+        prefs.save();
+        Prefs::apply_current(cx);
+    }
+
+    /// The appearance to show right now.
+    pub fn effective_appearance(&self, cx: &gpui_kit::App) -> Appearance {
+        if !self.follow_system {
+            return self.appearance;
+        }
+        match cx.window_appearance() {
+            gpui_kit::WindowAppearance::Light | gpui_kit::WindowAppearance::VibrantLight => {
+                Appearance::Light
+            }
+            _ => Appearance::Dark,
+        }
+    }
+
+    /// Apply the saved look (following the system if asked).
+    pub fn apply_current(cx: &mut gpui_kit::App) {
+        let prefs = cx.global::<Prefs>().clone();
+        let appearance = prefs.effective_appearance(cx);
+        crate::theme::apply(appearance, prefs.accent, cx);
     }
 
     pub fn set_backup_worlds(on: bool, cx: &mut gpui_kit::App) {
@@ -118,6 +152,7 @@ mod tests {
     fn prefs_round_trip_and_tolerate_old_files() {
         let prefs = Prefs {
             appearance: Appearance::Light,
+            follow_system: true,
             accent: Accent::Jade,
             onboarding_done: true,
             backup_worlds_on_exit: false,

@@ -243,6 +243,11 @@ pub struct AppState {
     pub running: HashMap<String, Running>,
     pub jobs: Vec<Job>,
     pub accounts: Vec<Account>,
+    /// The most downloaded modpacks, for Home (fetched once).
+    pub popular: Option<Vec<calcite_core::modrinth::SearchHit>>,
+    popular_loading: bool,
+    /// The active account's Minecraft face, for avatars.
+    pub face: Option<(uuid::Uuid, std::sync::Arc<gpui_kit::RenderImage>)>,
     pub default_account: Option<uuid::Uuid>,
     pub logs: HashMap<String, VecDeque<LogLine>>,
     /// A message for the user that hasn't been dismissed yet.
@@ -328,6 +333,9 @@ impl AppState {
             running: HashMap::new(),
             jobs: Vec::new(),
             accounts: Vec::new(),
+            face: None,
+            popular: None,
+            popular_loading: false,
             default_account: None,
             logs: HashMap::new(),
             notice: None,
@@ -1159,6 +1167,8 @@ impl AppState {
                     this.groups = groups.into_iter().map(|g| (g.id, g.name.into())).collect();
                     this.accounts = accounts;
                     this.default_account = default;
+                    this.load_face(cx);
+                    this.load_popular(cx);
                     for p in processes {
                         this.mark_running(p.instance_id, p.start_time, cx);
                     }
@@ -1179,6 +1189,94 @@ impl AppState {
         self.jobs
             .iter()
             .find(|j| j.is_active() && j.instance_id.as_deref() == Some(instance_id))
+    }
+
+    /// Fetch the active account's skin and cut out its face (once per
+    /// account; again after the skin changes).
+    pub fn load_face(&mut self, cx: &mut Context<Self>) {
+        let Some(account) = self.active_account().map(|a| a.id) else {
+            self.face = None;
+            return;
+        };
+        if self.face.as_ref().is_some_and(|(id, _)| *id == account) {
+            return;
+        }
+        let client = cx.global::<crate::ui::pages::discover::Api>().0.clone();
+        let task = Backend::global(cx).run(async move {
+            let skins = theseus::minecraft_skins::get_available_skins()
+                .await
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            let skin = skins
+                .into_iter()
+                .find(|s| s.is_equipped)
+                .ok_or_else(|| anyhow::anyhow!("no skin equipped"))?;
+            let url = skin.texture.to_string();
+            let bytes = match url.strip_prefix("data:") {
+                Some(data) => {
+                    use base64::Engine as _;
+                    let encoded = data.split_once(',').map(|(_, b)| b).unwrap_or_default();
+                    base64::engine::general_purpose::STANDARD.decode(encoded.trim())?
+                }
+                None => client.bytes(&url).await?,
+            };
+            tokio::task::spawn_blocking(move || -> anyhow::Result<image::RgbaImage> {
+                let texture = image::load_from_memory(&bytes)?.into_rgba8();
+                let skin = calcite_core::skin3d::normalize(&texture)
+                    .ok_or_else(|| anyhow::anyhow!("odd skin size"))?;
+                Ok(calcite_core::skin3d::face(&skin, 64))
+            })
+            .await?
+        });
+        cx.spawn(async move |this, cx| {
+            let result = task.await.and_then(|r| r);
+            let _ = this.update(cx, |this, cx| match result {
+                Ok(face) => {
+                    this.face = Some((account, crate::images::render_image(face)));
+                    cx.notify();
+                }
+                Err(error) => tracing::debug!("no face for the account: {error:#}"),
+            });
+        })
+        .detach();
+    }
+
+    /// Popular modpacks for Home, once per run.
+    pub fn load_popular(&mut self, cx: &mut Context<Self>) {
+        if self.popular.is_some() || self.popular_loading {
+            return;
+        }
+        self.popular_loading = true;
+        let client = cx.global::<crate::ui::pages::discover::Api>().0.clone();
+        let task = Backend::global(cx).run(async move {
+            let mut query = calcite_core::modrinth::SearchQuery::new(
+                calcite_core::modrinth::ProjectType::Modpack,
+            );
+            query.index = calcite_core::modrinth::SearchIndex::Downloads;
+            query.limit = 8;
+            client.search(&query).await
+        });
+        cx.spawn(async move |this, cx| {
+            let result = task.await.and_then(|r| r);
+            let _ = this.update(cx, |this, cx| {
+                this.popular_loading = false;
+                match result {
+                    Ok(results) => {
+                        this.popular = Some(results.hits);
+                        cx.notify();
+                    }
+                    Err(error) => tracing::debug!("popular modpacks: {error:#}"),
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// The face to show for an account, if it's the one loaded.
+    pub fn face_for(&self, account: uuid::Uuid) -> Option<gpui_kit::ImageSource> {
+        self.face
+            .as_ref()
+            .filter(|(id, _)| *id == account)
+            .map(|(_, image)| gpui_kit::ImageSource::Render(image.clone()))
     }
 
     pub fn active_account(&self) -> Option<&Account> {

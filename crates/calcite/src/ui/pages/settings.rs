@@ -230,6 +230,7 @@ fn accounts(shell: &mut Shell, cx: &mut Context<Shell>) -> AnyElement {
     for (ix, account) in accounts.into_iter().enumerate() {
         let id = account.id;
         let is_active = Some(id) == active;
+        let face = shell.state().read(cx).face_for(id);
         list = list.child(
             div()
                 .flex()
@@ -238,7 +239,15 @@ fn accounts(shell: &mut Shell, cx: &mut Context<Shell>) -> AnyElement {
                 .h(px(52.0))
                 .px(space(4.0))
                 .when(ix > 0, |d| d.border_t_1().border_color(p.border))
-                .child(icon("user", 16.0, p.text_muted))
+                .child(match face {
+                    Some(face) => div()
+                        .size(px(28.0))
+                        .rounded(px(radius::SM))
+                        .overflow_hidden()
+                        .child(gpui_kit::img(face).size_full())
+                        .into_any_element(),
+                    None => icon("user", 16.0, p.text_muted).into_any_element(),
+                })
                 .child(
                     div()
                         .flex_1()

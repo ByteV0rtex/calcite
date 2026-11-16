@@ -970,7 +970,7 @@ fn instance_row(
                 .text_size(px(type_scale::SMALL))
                 .text_color(p.text_muted)
                 .child(if inst.played_secs > 0 {
-                    short_duration(inst.played_secs)
+                    format!("{} played", short_duration(inst.played_secs))
                 } else {
                     "Not played yet".into()
                 })
@@ -1053,7 +1053,7 @@ fn instance_card(
             .into_any_element()
     } else {
         let played = if inst.played_secs > 0 {
-            short_duration(inst.played_secs)
+            format!("{} played", short_duration(inst.played_secs))
         } else {
             "Not played yet".into()
         };

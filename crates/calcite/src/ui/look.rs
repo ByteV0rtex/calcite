@@ -11,15 +11,23 @@ use crate::ui::components::icon;
 pub fn appearance_picker(cx: &App) -> impl IntoElement {
     let p = cx.palette().clone();
     let mut row = div().flex().gap(space(2.0));
-    for (label, appearance, glyph) in [
-        ("Dark", Appearance::Dark, "moon"),
-        ("Light", Appearance::Light, "sun"),
-        ("OLED", Appearance::Oled, "monitor"),
+    let following = cx.global::<Prefs>().follow_system;
+    // None: match the system.
+    for (label, choice, glyph) in [
+        ("Dark", Some(Appearance::Dark), "moon"),
+        ("Light", Some(Appearance::Light), "sun"),
+        ("OLED", Some(Appearance::Oled), "monitor"),
+        ("System", None, "sun-medium"),
     ] {
-        let active = p.appearance == appearance;
+        let active = match choice {
+            Some(appearance) => !following && p.appearance == appearance,
+            None => following,
+        };
         let accent = p.accent_kind;
-        // A tiny preview of each appearance's surfaces.
+        let appearance = choice.unwrap_or(Appearance::Light);
+        // A tiny preview of each appearance's surfaces; System shows both.
         let preview = Palette::new(appearance, accent);
+        let night = Palette::new(Appearance::Dark, accent);
         row = row.child(
             div()
                 .id(SharedString::from(format!("appearance-{label}")))
@@ -34,17 +42,26 @@ pub fn appearance_picker(cx: &App) -> impl IntoElement {
                 .bg(if active { p.accent_soft } else { p.surface })
                 .cursor_pointer()
                 .hover(|s| s.border_color(if active { p.accent } else { p.border_strong }))
-                .on_click(move |_, _, cx| Prefs::set_look(appearance, accent, cx))
+                .on_click(move |_, _, cx| match choice {
+                    Some(appearance) => Prefs::set_look(appearance, accent, cx),
+                    None => Prefs::set_follow_system(accent, cx),
+                })
                 .child(
                     div()
                         .h(px(56.0))
                         .rounded(px(radius::MD))
                         .bg(preview.app)
                         .border_1()
-                        .border_color(preview.border)
+                        .border_color(if choice.is_none() {
+                            night.border
+                        } else {
+                            preview.border
+                        })
                         .flex()
                         .gap(px(4.0))
                         .p(px(6.0))
+                        .relative()
+                        .overflow_hidden()
                         .child(div().w(px(22.0)).h_full().rounded(px(3.0)).bg(preview.rail))
                         .child(
                             div()
@@ -60,7 +77,20 @@ pub fn appearance_picker(cx: &App) -> impl IntoElement {
                                         .rounded(px(3.0))
                                         .bg(preview.accent),
                                 ),
-                        ),
+                        )
+                        .when(choice.is_none(), |d| {
+                            d.child(
+                                div()
+                                    .absolute()
+                                    .top_0()
+                                    .right_0()
+                                    .bottom_0()
+                                    .w_1_2()
+                                    .bg(night.app)
+                                    .border_l_1()
+                                    .border_color(night.border),
+                            )
+                        }),
                 )
                 .child(
                     div()

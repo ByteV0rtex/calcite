@@ -127,8 +127,12 @@ fn main() {
             } else if snapshot.is_some() {
                 saved.onboarding_done = true;
             }
-            theme::apply(saved.appearance, saved.accent, cx);
+            if snapshot.is_some() {
+                // Snapshots pick their look explicitly.
+                saved.follow_system = false;
+            }
             cx.set_global(saved);
+            prefs::Prefs::apply_current(cx);
 
             let api = calcite_core::modrinth::Client::new(&calcite_core::user_agent())
                 .expect("HTTP client");
@@ -162,6 +166,15 @@ fn main() {
             let window = cx
                 .open_window(options, |window, cx| {
                     window.set_window_title("Calcite");
+                    // Follow the system's light and dark when asked to.
+                    window
+                        .observe_window_appearance(|_, cx| {
+                            if cx.global::<prefs::Prefs>().follow_system {
+                                prefs::Prefs::apply_current(cx);
+                                cx.refresh_windows();
+                            }
+                        })
+                        .detach();
                     let start = match page_arg.as_str() {
                         "gallery" => Route::Gallery,
                         "library" => Route::Library,

@@ -1503,6 +1503,9 @@ impl Shell {
     fn account_row(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let p = cx.palette().clone();
         let account = self.state.read(cx).active_account().cloned();
+        let face = account
+            .as_ref()
+            .and_then(|a| self.state.read(cx).face_for(a.id));
         let (title, subtitle): (SharedString, SharedString) = match &account {
             Some(a) => (a.name.clone(), "Microsoft account".into()),
             None => ("Sign in".into(), "Needed to play".into()),
@@ -1549,15 +1552,20 @@ impl Shell {
                             .flex()
                             .items_center()
                             .justify_center()
-                            .child(icon(
-                                if account.is_some() { "user" } else { "log-in" },
-                                14.0,
-                                if account.is_some() {
-                                    p.text_secondary
-                                } else {
-                                    p.accent
-                                },
-                            )),
+                            .overflow_hidden()
+                            .child(match face {
+                                Some(face) => gpui_kit::img(face).size_full().into_any_element(),
+                                None => icon(
+                                    if account.is_some() { "user" } else { "log-in" },
+                                    14.0,
+                                    if account.is_some() {
+                                        p.text_secondary
+                                    } else {
+                                        p.accent
+                                    },
+                                )
+                                .into_any_element(),
+                            }),
                     )
                     .child(
                         div()
