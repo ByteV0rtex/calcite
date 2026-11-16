@@ -484,7 +484,7 @@ impl ProjectPage {
     }
 }
 
-fn title_case(s: &str) -> String {
+pub(crate) fn title_case(s: &str) -> String {
     let s = s.replace('-', " ");
     let mut chars = s.chars();
     match chars.next() {

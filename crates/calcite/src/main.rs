@@ -307,6 +307,11 @@ fn take_snapshot(window: gpui_kit::AnyWindowHandle, page: String, out: String, c
                                 _ => {}
                             }
                         }
+                        if word.starts_with("dev-")
+                            && let Some(page) = shell.instance_page_entity()
+                        {
+                            page.update(cx, |p, cx| p.dev(&word, window, cx));
+                        }
                         shell.with_instance_page(cx, |p, cx| match word.as_str() {
                             "start" => p.start_bisect(cx),
                             "works" => p.answer_bisect(false, cx),

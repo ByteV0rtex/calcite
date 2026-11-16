@@ -835,6 +835,67 @@ impl AppState {
         self.track_task(task, "Couldn't repair it", cx);
     }
 
+    /// Put the modpack back the way it ships: its own files come back
+    /// and anything you added is dropped. A snapshot is taken first.
+    pub fn reinstall_modpack(&mut self, id: String, cx: &mut Context<Self>) {
+        let snapshots = crate::ui::pages::instance_tabs::snapshots_dir(&id);
+        let task = Backend::global(cx).call(async move {
+            if let Some(snaps) = snapshots
+                && let Ok(dir) = theseus::instance::get_full_path(&id).await
+            {
+                let _ = tokio::task::spawn_blocking(move || {
+                    let result = calcite_core::snapshots::take(
+                        &dir,
+                        &snaps,
+                        "Before re-installing the modpack",
+                        true,
+                    );
+                    calcite_core::snapshots::prune_automatic(&snaps, 10);
+                    result
+                })
+                .await;
+            }
+            theseus::instance::repair_managed_modrinth(&id).await
+        });
+        self.track_task(task, "Couldn't re-install the modpack", cx);
+    }
+
+    /// Stop following the modpack. The files stay; the instance becomes a
+    /// normal one whose Minecraft version and loader can change, but it no
+    /// longer gets the pack's updates.
+    pub fn unlink_modpack(&mut self, id: String, cx: &mut Context<Self>) {
+        let task = Backend::global(cx).call(async move {
+            theseus::instance::edit(
+                &id,
+                theseus::data::EditInstance {
+                    link: Some(theseus::data::InstanceLink::Unmanaged),
+                    ..Default::default()
+                },
+            )
+            .await
+        });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| {
+                match result {
+                    Ok(_) => {
+                        this.notice = Some(Notice {
+                            title: "Unlinked from the modpack".into(),
+                            body: "It's a normal instance now. Its mods stay, but pack updates won't arrive.".into(),
+                            is_error: false,
+                        })
+                    }
+                    Err(error) => {
+                        this.notify_error("Couldn't unlink the modpack", format!("{error:#}"))
+                    }
+                }
+                this.refresh_all(cx);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     fn track_task(
         &mut self,
         task: impl Future<Output = anyhow::Result<InstallJobSnapshot>> + 'static,

@@ -1,6 +1,10 @@
 //! A single instance: header with Play, then its content and live logs.
 
 use chrono::Utc;
+use gpui_kit::component::Sizable as _;
+use gpui_kit::component::button::{Button as KitButton, ButtonVariants as _};
+use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::menu::{ContextMenuExt, DropdownMenu as _, PopupMenu, PopupMenuItem};
 use gpui_kit::prelude::*;
 use gpui_kit::{
     ClickEvent, Context, Entity, FontWeight, ListSizingBehavior, PathPromptOptions, SharedString,
@@ -74,6 +78,9 @@ struct Row {
     kind: ProjectType,
     /// Part of the instance's modpack rather than added by the player.
     from_pack: bool,
+    /// Frozen: updates skip it and its version can't change.
+    locked: bool,
+    version_id: Option<String>,
 }
 
 impl Row {
@@ -100,6 +107,8 @@ impl Row {
             project_id: item.project.as_ref().map(|p| p.id.clone()),
             kind: item.project_type,
             from_pack: false,
+            locked: item.locked,
+            version_id: item.version.as_ref().map(|v| v.id.clone()),
             path: item.file_path,
             file_name: file_name.into(),
         }
@@ -116,6 +125,26 @@ pub enum InstancePageEvent {
     Server(String, Option<crate::ui::server_dialog::Existing>),
     /// Rename a world: instance folder, world folder, current name.
     RenameWorld(std::path::PathBuf, String, String),
+    /// Pick another version: of one file, or (None) of the modpack.
+    PickVersion(String, Option<crate::ui::version_picker::PickFile>),
+}
+
+/// The modpack this instance follows.
+#[derive(Clone)]
+struct PackInfo {
+    title: SharedString,
+    icon_url: Option<String>,
+    version: Option<SharedString>,
+    /// The newer version this instance's update channel allows.
+    update: Option<SharedString>,
+    update_id: Option<String>,
+    project_id: String,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PackConfirm {
+    Reinstall,
+    Unlink,
 }
 
 impl gpui_kit::EventEmitter<InstancePageEvent> for InstancePage {}
@@ -139,6 +168,12 @@ pub struct InstancePage {
     shared_update: Option<usize>,
     files: Option<Entity<crate::ui::pages::files_tab::FilesBrowser>>,
     more_open: bool,
+    pack: Option<PackInfo>,
+    /// Show the modpack's own files in the list.
+    pack_open: bool,
+    pack_confirm: Option<PackConfirm>,
+    /// Filters the content list.
+    query: Entity<InputState>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -146,9 +181,15 @@ pub struct InstancePage {
 type MoreAction = Box<dyn Fn(&mut InstancePage, &mut Context<InstancePage>)>;
 
 impl InstancePage {
-    pub fn new(id: String, _window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(id: String, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let state = AppState::global(cx);
-        let subscriptions = vec![cx.observe(&state, |this, state, cx| {
+        let query = cx.new(|cx| InputState::new(window, cx).placeholder("Search content"));
+        let mut subscriptions = vec![cx.subscribe(&query, |_, _, event: &InputEvent, cx| {
+            if let InputEvent::Change = event {
+                cx.notify();
+            }
+        })];
+        subscriptions.push(cx.observe(&state, |this, state, cx| {
             // Reload content whenever the backend says it changed.
             let revision = state
                 .read(cx)
@@ -165,7 +206,7 @@ impl InstancePage {
                     .scroll_to_item(usize::MAX, gpui_kit::ScrollStrategy::Bottom);
             }
             cx.notify()
-        })];
+        }));
         let seen_revision = state
             .read(cx)
             .content_revision
@@ -188,6 +229,10 @@ impl InstancePage {
             shared_update: None,
             files: None,
             more_open: false,
+            pack: None,
+            pack_open: false,
+            pack_confirm: None,
+            query,
             _subscriptions: subscriptions,
         };
         page.load_content(cx);
@@ -426,7 +471,7 @@ impl InstancePage {
         };
         let updates: Vec<theseus::install::ContentUpdateSelection> = rows
             .iter()
-            .filter(|r| r.has_update)
+            .filter(|r| r.has_update && !r.locked)
             .filter_map(|r| {
                 Some(theseus::install::ContentUpdateSelection {
                     project_path: r.path.clone(),
@@ -500,6 +545,58 @@ impl InstancePage {
         cx.notify();
     }
 
+    /// Dev hooks for snapshots: `dev-switch-pack`, `dev-switch-first`,
+    /// `dev-pack-files`, `dev-search=<text>`.
+    #[cfg_attr(not(feature = "snapshot"), allow(dead_code))]
+    pub(crate) fn dev(&mut self, word: &str, window: &mut Window, cx: &mut Context<Self>) {
+        match word {
+            "dev-switch-pack" => cx.emit(InstancePageEvent::PickVersion(self.id.clone(), None)),
+            "dev-pack-files" => self.pack_open = true,
+            "dev-freeze-update" => {
+                // Freeze the first row that has an update waiting.
+                let path = self
+                    .content
+                    .as_ref()
+                    .and_then(|c| c.as_ref().ok())
+                    .and_then(|rows| rows.iter().find(|r| r.has_update && !r.from_pack))
+                    .map(|r| r.path.clone());
+                if let Some(path) = path {
+                    self.set_locked(path, true, cx);
+                }
+            }
+            "dev-switch-first" => {
+                let first = self
+                    .content
+                    .as_ref()
+                    .and_then(|c| c.as_ref().ok())
+                    .and_then(|rows| {
+                        rows.iter()
+                            .find(|r| r.project_id.is_some() && !r.from_pack)
+                            .cloned()
+                    });
+                if let Some(row) = first {
+                    cx.emit(InstancePageEvent::PickVersion(
+                        self.id.clone(),
+                        Some(crate::ui::version_picker::PickFile {
+                            path: row.path.clone(),
+                            project_id: row.project_id.clone().unwrap_or_default(),
+                            title: row.title.to_string(),
+                            icon_url: row.icon_url.clone(),
+                            current: row.version_id.clone(),
+                            kind: row.kind,
+                        }),
+                    ));
+                }
+            }
+            w if w.starts_with("dev-search=") => {
+                let text = w.trim_start_matches("dev-search=").to_string();
+                self.query.update(cx, |q, cx| q.set_value(text, window, cx));
+            }
+            _ => {}
+        }
+        cx.notify();
+    }
+
     /// Dev hook: open a file in the Files tab.
     #[cfg_attr(not(feature = "snapshot"), allow(dead_code))]
     pub(crate) fn open_file(&mut self, path: String, cx: &mut Context<Self>) {
@@ -542,6 +639,7 @@ impl InstancePage {
         // Phase 2: a modpack's own files. The first lookup per pack asks
         // Modrinth about every file, so it arrives separately.
         if self.is_modpack(cx) {
+            self.load_pack_info(cx);
             self.pack_loading = true;
             let id = self.id.clone();
             let pack = Backend::global(cx).call(async move {
@@ -595,6 +693,384 @@ impl InstancePage {
             });
         })
         .detach();
+    }
+
+    /// The modpack this instance follows, and whether a newer one is out.
+    fn load_pack_info(&mut self, cx: &mut Context<Self>) {
+        let id = self.id.clone();
+        let fetch = Backend::global(cx)
+            .call(async move { theseus::instance::get_linked_modpack_info(&id, None).await });
+        cx.spawn(async move |this, cx| {
+            let result = fetch.await;
+            let _ = this.update(cx, |this, cx| {
+                this.pack = match result {
+                    Ok(Some(info)) => Some(PackInfo {
+                        title: info.project.title.clone().into(),
+                        icon_url: info.project.icon_url.clone(),
+                        version: info
+                            .version
+                            .as_ref()
+                            .map(|v| v.version_number.clone().into()),
+                        update: info
+                            .has_update
+                            .then(|| {
+                                info.update_version
+                                    .as_ref()
+                                    .map(|v| v.version_number.clone().into())
+                            })
+                            .flatten(),
+                        update_id: info
+                            .has_update
+                            .then(|| info.update_version_id.clone())
+                            .flatten(),
+                        project_id: info.project.id.clone(),
+                    }),
+                    _ => None,
+                };
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Move the modpack to its newest version (a snapshot comes first).
+    fn update_pack(&mut self, cx: &mut Context<Self>) {
+        let Some(pack) = &self.pack else {
+            return;
+        };
+        let Some(version_id) = pack.update_id.clone() else {
+            return;
+        };
+        let label = format!(
+            "Before updating {} to {}",
+            pack.title,
+            pack.update.clone().unwrap_or_default()
+        );
+        if let Some(pack) = &mut self.pack {
+            pack.update = None;
+            pack.update_id = None;
+        }
+        let id = self.id.clone();
+        let snapshots = crate::ui::pages::instance_tabs::snapshots_dir(&id);
+        let call = Backend::global(cx).call(async move {
+            if let Some(snaps) = snapshots
+                && let Ok(dir) = theseus::instance::get_full_path(&id).await
+            {
+                let _ = tokio::task::spawn_blocking(move || {
+                    let result = calcite_core::snapshots::take(&dir, &snaps, &label, true);
+                    calcite_core::snapshots::prune_automatic(&snaps, 10);
+                    result
+                })
+                .await;
+            }
+            theseus::instance::update_managed_modrinth_version(&id, &version_id).await
+        });
+        let state = self.state.clone();
+        cx.spawn(async move |_, cx| {
+            let result = call.await;
+            state.update(cx, |state, cx| {
+                match result {
+                    Ok(job) => state.track_job(job, cx),
+                    Err(error) => {
+                        state.notify_error("Couldn't update the modpack", format!("{error:#}"))
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// The card at the top of Content for modpack instances.
+    fn pack_card(&self, cx: &mut Context<Self>) -> Option<gpui_kit::AnyElement> {
+        let pack = self.pack.clone()?;
+        let p = cx.palette().clone();
+        let source = pack
+            .icon_url
+            .as_deref()
+            .and_then(|url| Images::get(url, 80, cx));
+        let files = self.pack_rows.len();
+        let mut detail = vec!["Modpack".to_string()];
+        if let Some(v) = &pack.version {
+            detail.push(v.to_string());
+        }
+        if files > 0 {
+            detail.push(format!("{files} files from the pack"));
+        }
+        let page = cx.entity().downgrade();
+        let project = pack.project_id.clone();
+        let more = KitButton::new("pack-more")
+            .ghost()
+            .small()
+            .child(icon("ellipsis", 14.0, p.text_secondary))
+            .dropdown_menu(move |menu, _, _| {
+                let (a, b, c) = (page.clone(), page.clone(), page.clone());
+                let project = project.clone();
+                menu.item(
+                    PopupMenuItem::new("Open project page").on_click(move |_, _, cx| {
+                        let _ = a.update(cx, |_, cx| {
+                            cx.emit(InstancePageEvent::OpenProject(project.clone()))
+                        });
+                    }),
+                )
+                .separator()
+                .item(
+                    PopupMenuItem::new("Re-install modpack…").on_click(move |_, _, cx| {
+                        let _ = b.update(cx, |this, cx| {
+                            this.pack_confirm = Some(PackConfirm::Reinstall);
+                            cx.notify();
+                        });
+                    }),
+                )
+                .item(
+                    PopupMenuItem::new("Unlink modpack…").on_click(move |_, _, cx| {
+                        let _ = c.update(cx, |this, cx| {
+                            this.pack_confirm = Some(PackConfirm::Unlink);
+                            cx.notify();
+                        });
+                    }),
+                )
+            });
+        let confirm = self.pack_confirm.map(|which| {
+            let (text, action, danger) = match which {
+                PackConfirm::Reinstall => (
+                    format!("Re-install {}? Its own files come back the way the pack ships them, and anything you added is removed. Calcite saves a snapshot first.", pack.title),
+                    "Re-install",
+                    true,
+                ),
+                PackConfirm::Unlink => (
+                    format!("Unlink from {}? Everything stays installed and you can change the Minecraft version and loader, but this instance won't get the pack's updates anymore.", pack.title),
+                    "Unlink",
+                    false,
+                ),
+            };
+            div()
+                .flex()
+                .items_center()
+                .gap(space(3.0))
+                .pt(space(3.0))
+                .mt(space(3.0))
+                .border_t_1()
+                .border_color(p.border)
+                .child(
+                    div()
+                        .flex_1()
+                        .text_size(px(type_scale::SMALL))
+                        .text_color(p.text_secondary)
+                        .child(text),
+                )
+                .child(
+                    Button::new("pack-confirm-no")
+                        .label("Cancel")
+                        .small()
+                        .ghost()
+                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                            this.pack_confirm = None;
+                            cx.notify();
+                        })),
+                )
+                .child({
+                    let b = Button::new("pack-confirm-yes").label(action).small();
+                    let b = if danger { b.danger() } else { b.primary() };
+                    b.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        this.pack_confirm = None;
+                        let id = this.id.clone();
+                        match which {
+                            PackConfirm::Reinstall => {
+                                this.state.update(cx, |s, cx| s.reinstall_modpack(id, cx))
+                            }
+                            PackConfirm::Unlink => {
+                                this.pack = None;
+                                this.pack_rows.clear();
+                                this.state.update(cx, |s, cx| s.unlink_modpack(id, cx))
+                            }
+                        }
+                        cx.notify();
+                    }))
+                })
+        });
+        Some(
+            div()
+                .mx(space(8.0))
+                .mt(space(3.0))
+                .p(space(3.0))
+                .rounded(px(radius::MD))
+                .bg(p.surface)
+                .border_1()
+                .border_color(p.border)
+                .flex()
+                .flex_col()
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(space(3.0))
+                        .child(thumb(source, &pack.title, 40.0, radius::SM, cx))
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .flex_1()
+                                .min_w_0()
+                                .child(
+                                    div()
+                                        .truncate()
+                                        .text_size(px(type_scale::BODY_LG))
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(p.text)
+                                        .child(pack.title.clone()),
+                                )
+                                .child(
+                                    div()
+                                        .truncate()
+                                        .text_size(px(type_scale::SMALL))
+                                        .text_color(p.text_muted)
+                                        .child(detail.join(" · ")),
+                                ),
+                        )
+                        .when_some(pack.update.clone(), |d, v| {
+                            d.child(
+                                Button::new("pack-update")
+                                    .icon("arrow-down-to-line")
+                                    .label(format!("Update to {v}"))
+                                    .small()
+                                    .primary()
+                                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                        this.update_pack(cx)
+                                    })),
+                            )
+                        })
+                        .child(
+                            Button::new("pack-switch")
+                                .icon("arrow-left-right")
+                                .label("Switch version")
+                                .small()
+                                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                    cx.emit(InstancePageEvent::PickVersion(this.id.clone(), None))
+                                })),
+                        )
+                        .child(more),
+                )
+                .children(confirm)
+                .into_any_element(),
+        )
+    }
+
+    /// Something changed this instance's files (a version switch, say).
+    pub(crate) fn content_changed(&mut self, cx: &mut Context<Self>) {
+        self.load_content(cx);
+        self.check_updates(cx);
+    }
+
+    fn set_locked(&mut self, path: String, locked: bool, cx: &mut Context<Self>) {
+        let id = self.id.clone();
+        self.busy_paths.push(path.clone());
+        cx.notify();
+        let call = Backend::global(cx)
+            .call(async move { theseus::instance::set_project_locked(&id, &path, locked).await });
+        self.after(call, "Couldn't change that", cx);
+    }
+
+    /// Show one of the instance's files in Finder / Explorer.
+    fn reveal(&mut self, path: String, cx: &mut Context<Self>) {
+        let id = self.id.clone();
+        let fetch = Backend::global(cx)
+            .call(async move { theseus::instance::get_mod_full_path(&id, &path).await });
+        cx.spawn(async move |_, cx| {
+            if let Ok(path) = fetch.await {
+                cx.update(|cx| cx.reveal_path(&path));
+            }
+        })
+        .detach();
+    }
+
+    /// The ⋮ / right-click menu for one row.
+    fn row_menu(
+        menu: PopupMenu,
+        row: &Row,
+        instance: &str,
+        page: gpui_kit::WeakEntity<InstancePage>,
+    ) -> PopupMenu {
+        let mut menu = menu;
+        if let Some(project) = row.project_id.clone()
+            && !row.from_pack
+        {
+            let (page, file) = (
+                page.clone(),
+                crate::ui::version_picker::PickFile {
+                    path: row.path.clone(),
+                    project_id: project,
+                    title: row.title.to_string(),
+                    icon_url: row.icon_url.clone(),
+                    current: row.version_id.clone(),
+                    kind: row.kind,
+                },
+            );
+            let id = instance.to_string();
+            let locked = row.locked;
+            menu = menu.item(
+                PopupMenuItem::new("Switch version…")
+                    .disabled(locked)
+                    .on_click(move |_, _, cx| {
+                        let _ = page.update(cx, |_, cx| {
+                            cx.emit(InstancePageEvent::PickVersion(
+                                id.clone(),
+                                Some(file.clone()),
+                            ))
+                        });
+                    }),
+            );
+        }
+        if let Some(project) = row.project_id.clone() {
+            let page = page.clone();
+            menu = menu.item(
+                PopupMenuItem::new("Open project page").on_click(move |_, _, cx| {
+                    let _ = page.update(cx, |_, cx| {
+                        cx.emit(InstancePageEvent::OpenProject(project.clone()))
+                    });
+                }),
+            );
+            let link = format!(
+                "https://modrinth.com/project/{}",
+                row.project_id.as_deref().unwrap_or_default()
+            );
+            menu = menu.item(PopupMenuItem::new("Copy link").on_click(move |_, _, cx| {
+                cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(link.clone()));
+            }));
+        }
+        {
+            let (page, path) = (page.clone(), row.path.clone());
+            menu = menu.item(
+                PopupMenuItem::new(if cfg!(target_os = "macos") {
+                    "Show in Finder"
+                } else {
+                    "Show in folder"
+                })
+                .on_click(move |_, _, cx| {
+                    let _ = page.update(cx, |this, cx| this.reveal(path.clone(), cx));
+                }),
+            );
+        }
+        if !row.from_pack {
+            let (freeze, path, locked) = (page.clone(), row.path.clone(), row.locked);
+            menu = menu.separator().item(
+                PopupMenuItem::new(if locked {
+                    "Unfreeze version"
+                } else {
+                    "Freeze version"
+                })
+                .on_click(move |_, _, cx| {
+                    let _ =
+                        freeze.update(cx, |this, cx| this.set_locked(path.clone(), !locked, cx));
+                }),
+            );
+            let (page, path) = (page.clone(), row.path.clone());
+            menu = menu.item(PopupMenuItem::new("Remove").on_click(move |_, _, cx| {
+                let _ = page.update(cx, |this, cx| this.remove(path.clone(), cx));
+            }));
+        }
+        menu
     }
 
     /// Lines the game printed earlier in this session (before this page opened).
@@ -1100,7 +1576,7 @@ impl InstancePage {
 
         let updates = rows
             .iter()
-            .filter(|r| r.has_update && r.update_version.is_some())
+            .filter(|r| r.has_update && r.update_version.is_some() && !r.locked)
             .count();
         let toolbar = div()
             .flex()
@@ -1110,6 +1586,11 @@ impl InstancePage {
             .py(space(3.0))
             .child(filters)
             .child(div().flex_1())
+            .child(
+                div()
+                    .w(px(200.0))
+                    .child(Input::new(&self.query).small().cleanable(true)),
+            )
             .when(updates > 0, |d| {
                 d.child(
                     Button::new("update-all")
@@ -1138,19 +1619,36 @@ impl InstancePage {
                     })),
             );
 
+        let query = self.query.read(cx).value().trim().to_lowercase();
+        let pack_total = rows
+            .iter()
+            .filter(|r| r.from_pack && self.filter.matches(r.kind))
+            .count();
+        let show_pack = self.pack_open || !query.is_empty();
         let visible: Vec<Row> = rows
             .into_iter()
             .filter(|r| self.filter.matches(r.kind))
+            .filter(|r| {
+                query.is_empty()
+                    || r.title.to_lowercase().contains(&query)
+                    || r.file_name.to_lowercase().contains(&query)
+                    || r.author
+                        .as_ref()
+                        .is_some_and(|a| a.to_lowercase().contains(&query))
+            })
+            .filter(|r| show_pack || !r.from_pack)
             .collect();
-        if visible.is_empty() && !self.pack_loading {
+        let pack_card = self.pack_card(cx);
+        if visible.is_empty() && !self.pack_loading && pack_total == 0 {
             return div()
                 .size_full()
                 .flex()
                 .flex_col()
+                .children(pack_card)
                 .child(toolbar)
                 .child(empty_state(
                     "package",
-                    "Nothing installed yet",
+                    if query.is_empty() { "Nothing installed yet" } else { "Nothing matches" },
                     "Use Add content to browse mods, packs and shaders that fit this instance, or add files from your computer.",
                     None,
                     cx,
@@ -1167,7 +1665,7 @@ impl InstancePage {
             .overflow_y_scroll()
             .px(space(8.0))
             .pb(space(8.0));
-        let has_pack = visible.iter().any(|r| r.from_pack);
+        let has_pack = pack_total > 0;
         let has_added = visible.iter().any(|r| !r.from_pack);
         let heading = |text: String| {
             div()
@@ -1179,13 +1677,42 @@ impl InstancePage {
                 .text_color(p.text_muted)
                 .child(text)
         };
+        let pack_toggle = |open: bool, count: usize, cx: &mut Context<Self>| {
+            div()
+                .id("pack-files-toggle")
+                .flex()
+                .items_center()
+                .gap(space(1.5))
+                .pt(space(4.0))
+                .pb(space(1.5))
+                .px(space(3.0))
+                .cursor_pointer()
+                .text_size(px(type_scale::SMALL))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(p.text_muted)
+                .hover(|s| s.text_color(p.text))
+                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                    this.pack_open = !this.pack_open;
+                    cx.notify();
+                }))
+                .child(icon(
+                    if open {
+                        "chevron-down"
+                    } else {
+                        "chevron-right"
+                    },
+                    12.0,
+                    p.text_muted,
+                ))
+                .child(format!("From the modpack · {count}"))
+        };
+        if has_pack && has_added {
+            list = list.child(heading("Added by you".into()));
+        }
+        let page = cx.entity().downgrade();
         for (ix, row) in visible.iter().enumerate() {
-            if has_pack && has_added && ix == 0 {
-                list = list.child(heading("Added by you".into()));
-            }
-            if has_pack && row.from_pack && (ix == 0 || !visible[ix - 1].from_pack) {
-                let count = visible.iter().filter(|r| r.from_pack).count();
-                list = list.child(heading(format!("From the modpack · {count}")));
+            if row.from_pack && (ix == 0 || !visible[ix - 1].from_pack) {
+                list = list.child(pack_toggle(true, pack_total, cx));
             }
             let source = row
                 .icon_url
@@ -1281,20 +1808,30 @@ impl InstancePage {
                             .items_center()
                             .justify_end()
                             .gap(space(2.0))
-                            .when(row.has_update && row.update_version.is_some(), |d| {
-                                let path = row.path.clone();
+                            .when(row.locked, |d| {
                                 d.child(
-                                    Button::new(SharedString::from(format!("update-{ix}")))
-                                        .icon("refresh-cw")
-                                        .label("Update")
-                                        .small()
-                                        .on_click(cx.listener(
-                                            move |this, _: &ClickEvent, _, cx| {
-                                                this.update_one(path.clone(), cx)
-                                            },
-                                        )),
+                                    div()
+                                        .id(SharedString::from(format!("locked-{ix}")))
+                                        .child(icon("lock", 12.0, p.text_muted)),
                                 )
                             })
+                            .when(
+                                row.has_update && row.update_version.is_some() && !row.locked,
+                                |d| {
+                                    let path = row.path.clone();
+                                    d.child(
+                                        Button::new(SharedString::from(format!("update-{ix}")))
+                                            .icon("refresh-cw")
+                                            .label("Update")
+                                            .small()
+                                            .on_click(cx.listener(
+                                                move |this, _: &ClickEvent, _, cx| {
+                                                    this.update_one(path.clone(), cx)
+                                                },
+                                            )),
+                                    )
+                                },
+                            )
                             .child(
                                 div()
                                     .truncate()
@@ -1305,22 +1842,39 @@ impl InstancePage {
                     )
                     // Pack files come back with the next modpack update, so
                     // they can be turned off but not removed.
-                    .child(if row.from_pack {
-                        div().w(px(28.0)).into_any_element()
-                    } else {
-                        Button::new(SharedString::from(format!("remove-{ix}")))
-                            .icon("trash")
+                    .when(!row.from_pack, |d| {
+                        d.child(
+                            Button::new(SharedString::from(format!("remove-{ix}")))
+                                .icon("trash")
+                                .ghost()
+                                .small()
+                                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                    this.remove(remove_path.clone(), cx)
+                                })),
+                        )
+                    })
+                    .when(row.from_pack, |d| d.child(div().w(px(28.0))))
+                    .child({
+                        let (row, id, page) = (row.clone(), self.id.clone(), page.clone());
+                        KitButton::new(SharedString::from(format!("row-more-{ix}")))
                             .ghost()
                             .small()
-                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                                this.remove(remove_path.clone(), cx)
-                            }))
-                            .into_any_element()
+                            .child(icon("ellipsis-vertical", 14.0, p.text_muted))
+                            .dropdown_menu(move |menu, _, _| {
+                                InstancePage::row_menu(menu, &row, &id, page.clone())
+                            })
+                    })
+                    .context_menu({
+                        let (row, id, page) = (row.clone(), self.id.clone(), page.clone());
+                        move |menu, _, _| InstancePage::row_menu(menu, &row, &id, page.clone())
                     }),
             );
         }
+        if has_pack && !show_pack {
+            list = list.child(pack_toggle(false, pack_total, cx));
+        }
 
-        if self.pack_loading && !visible.iter().any(|r| r.from_pack) {
+        if self.pack_loading && pack_total == 0 {
             list = list.child(heading("From the modpack · loading…".into()));
             for _ in 0..3 {
                 list = list.child(
@@ -1341,6 +1895,7 @@ impl InstancePage {
             .size_full()
             .flex()
             .flex_col()
+            .children(pack_card)
             .child(toolbar)
             .child(list)
             .into_any_element()

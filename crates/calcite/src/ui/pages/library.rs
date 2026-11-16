@@ -1000,7 +1000,7 @@ fn instance_row(
         .context_menu(menu)
 }
 
-fn checkbox(on: bool, cx: &App) -> gpui_kit::Div {
+pub(crate) fn checkbox(on: bool, cx: &App) -> gpui_kit::Div {
     let p = cx.palette();
     div()
         .size(px(16.0))

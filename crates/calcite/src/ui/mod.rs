@@ -10,3 +10,4 @@ pub mod rename_world;
 pub mod server_dialog;
 pub mod share;
 pub mod shell;
+pub mod version_picker;

@@ -32,6 +32,10 @@ pub enum DialogEvent {
     WorldsChanged,
     /// Swap this dialog for "Change version" on that instance.
     ChangeVersion(String),
+    /// Swap this dialog for "Switch modpack version" on that instance.
+    SwitchModpack(String),
+    /// Changed the open instance's content; close and reload it.
+    ContentChanged,
 }
 
 type VersionSelect = SelectState<SearchableVec<SharedString>>;

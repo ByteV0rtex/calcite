@@ -157,6 +157,8 @@ pub struct Shell {
     /// "Change version" asked for from instance settings; opened on the
     /// next render (it needs the window).
     pending_change_version: Option<String>,
+    /// Same for "Switch modpack version".
+    pending_switch_modpack: Option<String>,
     pub library: LibraryView,
     account_menu_open: bool,
     downloads_open: bool,
@@ -227,6 +229,7 @@ impl Shell {
             library_filter,
             global_search,
             pending_change_version: None,
+            pending_switch_modpack: None,
             library: LibraryView::default(),
             account_menu_open: false,
             downloads_open: false,
@@ -292,6 +295,16 @@ impl Shell {
                         }
                         InstancePageEvent::OpenProject(project) => {
                             this.navigate(Route::Project(project.clone(), None), window, cx)
+                        }
+                        InstancePageEvent::PickVersion(id, file) => {
+                            use crate::ui::version_picker::VersionPicker;
+                            let dialog = cx.new(|cx| match file {
+                                Some(file) => {
+                                    VersionPicker::file(id.clone(), file.clone(), window, cx)
+                                }
+                                None => VersionPicker::modpack(id.clone(), window, cx),
+                            });
+                            this.show_dialog(dialog, cx);
                         }
                     },
                 )
@@ -494,6 +507,16 @@ impl Shell {
                 this.pending_change_version = Some(id.clone());
                 cx.notify();
             }
+            DialogEvent::SwitchModpack(id) => {
+                this.dialog = None;
+                this.pending_switch_modpack = Some(id.clone());
+                cx.notify();
+            }
+            DialogEvent::ContentChanged => {
+                this.dialog = None;
+                this.with_instance_page(cx, |p, cx| p.content_changed(cx));
+                cx.notify();
+            }
         })
         .detach();
         self.dialog = Some(dialog.into());
@@ -600,6 +623,12 @@ impl Shell {
         if let Some(page) = &self.instance_page {
             page.update(cx, f);
         }
+    }
+
+    /// Dev hook: the open instance page.
+    #[cfg_attr(not(feature = "snapshot"), allow(dead_code))]
+    pub fn instance_page_entity(&self) -> Option<Entity<InstancePage>> {
+        self.instance_page.clone()
     }
 
     fn instance_title(&self, cx: &App) -> SharedString {
@@ -1515,6 +1544,11 @@ impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if let Some(id) = self.pending_change_version.take() {
             let dialog = cx.new(|cx| CreateInstanceDialog::change_version(id, window, cx));
+            self.show_dialog(dialog, cx);
+        }
+        if let Some(id) = self.pending_switch_modpack.take() {
+            let dialog =
+                cx.new(|cx| crate::ui::version_picker::VersionPicker::modpack(id, window, cx));
             self.show_dialog(dialog, cx);
         }
         let p = cx.palette().clone();

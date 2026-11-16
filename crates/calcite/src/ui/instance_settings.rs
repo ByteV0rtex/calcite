@@ -10,7 +10,10 @@ use theseus::data::{
     EditInstance, Hooks, InstanceLaunchOverridesPatch, MemorySettings, WindowSize,
 };
 
+use theseus::prelude::ReleaseChannel;
+
 use crate::backend::Backend;
+use crate::images::Images;
 use crate::state::AppState;
 use crate::theme::{PaletteExt, radius, space, type_scale};
 use crate::ui::components::{Button, icon};
@@ -43,6 +46,13 @@ pub struct InstanceSettings {
     system_memory_mb: u64,
     confirm_delete: bool,
     saving: bool,
+    /// Which updates count: releases only, or betas / alphas too.
+    channel: Option<ReleaseChannel>,
+    icon: Option<std::path::PathBuf>,
+    /// The linked modpack: name, version, icon.
+    pack: Option<(SharedString, Option<SharedString>, Option<String>)>,
+    /// Asking before a modpack change: re-install (true) or unlink (false).
+    confirm_pack: Option<bool>,
 }
 
 impl EventEmitter<DialogEvent> for InstanceSettings {}
@@ -76,7 +86,21 @@ impl InstanceSettings {
             system_memory_mb: 0,
             confirm_delete: false,
             saving: false,
+            channel: None,
+            icon: None,
+            pack: None,
+            confirm_pack: None,
         };
+        #[cfg(feature = "snapshot")]
+        if let Ok(section) = std::env::var("CALCITE_SNAPSHOT_SECTION") {
+            this.section = match section.as_str() {
+                "installation" => Section::Installation,
+                "java" => Section::Java,
+                "window" => Section::Window,
+                "hooks" => Section::Hooks,
+                _ => Section::General,
+            };
+        }
         this.load(window, cx);
         this
     }
@@ -154,12 +178,104 @@ impl InstanceSettings {
                     cx,
                 );
                 this.fullscreen = o.force_fullscreen;
+                this.channel = Some(meta.instance.update_channel);
+                this.icon = meta
+                    .instance
+                    .icon_path
+                    .clone()
+                    .map(std::path::PathBuf::from);
+                if !matches!(meta.link, theseus::data::InstanceLink::Unmanaged) {
+                    this.load_pack(cx);
+                }
                 this.system_memory_mb = max_kb / 1024;
                 this.loaded = true;
                 cx.notify();
             });
         })
         .detach();
+    }
+
+    fn load_pack(&mut self, cx: &mut Context<Self>) {
+        let id = self.id.clone();
+        let fetch = Backend::global(cx)
+            .call(async move { theseus::instance::get_linked_modpack_info(&id, None).await });
+        cx.spawn(async move |this, cx| {
+            if let Ok(Some(info)) = fetch.await {
+                let _ = this.update(cx, |this, cx| {
+                    this.pack = Some((
+                        info.project.title.clone().into(),
+                        info.version
+                            .as_ref()
+                            .map(|v| v.version_number.clone().into()),
+                        info.project.icon_url.clone(),
+                    ));
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+    }
+
+    /// Pick a picture for the instance (saved right away).
+    fn choose_icon(&mut self, cx: &mut Context<Self>) {
+        let paths = cx.prompt_for_paths(gpui_kit::PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some("Use as icon".into()),
+        });
+        let id = self.id.clone();
+        let backend = Backend::global(cx).clone();
+        cx.spawn(async move |this, cx| {
+            let Ok(Ok(Some(paths))) = paths.await else {
+                return;
+            };
+            let Some(path) = paths.into_iter().next() else {
+                return;
+            };
+            let result = backend
+                .call(async move {
+                    theseus::instance::edit_icon(&id, Some(&path)).await?;
+                    theseus::instance::get(&id).await
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| this.icon_saved(result, cx));
+        })
+        .detach();
+    }
+
+    fn remove_icon(&mut self, cx: &mut Context<Self>) {
+        let id = self.id.clone();
+        let task = Backend::global(cx).call(async move {
+            theseus::instance::edit_icon(&id, None).await?;
+            theseus::instance::get(&id).await
+        });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| this.icon_saved(result, cx));
+        })
+        .detach();
+    }
+
+    fn icon_saved(
+        &mut self,
+        result: anyhow::Result<Option<theseus::data::InstanceMetadata>>,
+        cx: &mut Context<Self>,
+    ) {
+        let state = AppState::global(cx);
+        match result {
+            Ok(meta) => {
+                self.icon = meta
+                    .and_then(|m| m.instance.icon_path)
+                    .map(std::path::PathBuf::from);
+                state.update(cx, |s, cx| s.refresh_all(cx));
+            }
+            Err(error) => state.update(cx, |s, cx| {
+                s.notify_error("Couldn't change the icon", format!("{error:#}"));
+                cx.notify();
+            }),
+        }
+        cx.notify();
     }
 
     fn value(state: &Entity<InputState>, cx: &App) -> String {
@@ -196,6 +312,7 @@ impl InstanceSettings {
         };
         let patch = EditInstance {
             name: opt(name),
+            update_channel: self.channel,
             launch_overrides: Some(InstanceLaunchOverridesPatch {
                 java_path: Some(opt(Self::value(&self.java_path, cx))),
                 extra_launch_args: Some((!args.is_empty()).then_some(args)),
@@ -273,6 +390,259 @@ impl InstanceSettings {
         .detach();
     }
 
+    fn icon_editor(&self, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
+        let p = cx.palette().clone();
+        let name = AppState::global(cx)
+            .read(cx)
+            .instance(&self.id)
+            .map(|i| i.name.clone())
+            .unwrap_or_default();
+        let source = self
+            .icon
+            .as_deref()
+            .and_then(|path| Images::get_file(path, 112, cx));
+        let has_icon = self.icon.is_some();
+        div()
+            .flex()
+            .items_center()
+            .gap(space(2.0))
+            .child(
+                div()
+                    .id("is-icon")
+                    .cursor_pointer()
+                    .rounded(px(radius::MD))
+                    .border_1()
+                    .border_color(p.border)
+                    .hover(|s| s.border_color(p.border_strong))
+                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.choose_icon(cx)))
+                    .child(crate::ui::components::thumb(
+                        source,
+                        &name,
+                        56.0,
+                        radius::MD,
+                        cx,
+                    )),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(space(1.0))
+                    .child(
+                        Button::new("is-icon-change")
+                            .icon("image")
+                            .label("Change icon…")
+                            .small()
+                            .on_click(
+                                cx.listener(|this, _: &ClickEvent, _, cx| this.choose_icon(cx)),
+                            ),
+                    )
+                    .when(has_icon, |d| {
+                        d.child(
+                            Button::new("is-icon-remove")
+                                .icon("x")
+                                .label("Remove")
+                                .small()
+                                .ghost()
+                                .on_click(
+                                    cx.listener(|this, _: &ClickEvent, _, cx| this.remove_icon(cx)),
+                                ),
+                        )
+                    }),
+            )
+            .into_any_element()
+    }
+
+    fn channel_picker(&self, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
+        let p = cx.palette().clone();
+        let current = self.channel.unwrap_or(ReleaseChannel::Release);
+        div()
+            .flex()
+            .gap(space(1.0))
+            .children(
+                [
+                    (ReleaseChannel::Release, "Release"),
+                    (ReleaseChannel::Beta, "Beta"),
+                    (ReleaseChannel::Alpha, "Alpha"),
+                ]
+                .into_iter()
+                .map(|(channel, label)| {
+                    let active = current == channel;
+                    div()
+                        .id(SharedString::from(format!("is-channel-{label}")))
+                        .flex()
+                        .items_center()
+                        .gap(space(1.5))
+                        .h(px(30.0))
+                        .px(space(3.0))
+                        .rounded(px(radius::SM))
+                        .text_size(px(type_scale::BODY))
+                        .cursor_pointer()
+                        .when(active, |d| {
+                            d.bg(p.raised)
+                                .text_color(p.text)
+                                .border_1()
+                                .border_color(p.border_strong)
+                        })
+                        .when(!active, |d| {
+                            d.text_color(p.text_secondary).hover(|s| s.bg(p.hover))
+                        })
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                            this.channel = Some(channel);
+                            cx.notify();
+                        }))
+                        .when(active, |d| d.child(icon("check", 12.0, p.accent)))
+                        .child(label)
+                }),
+            )
+            .into_any_element()
+    }
+
+    /// The modpack this instance follows: switch version, re-install, unlink.
+    fn modpack_block(&self, cx: &mut Context<Self>) -> Option<gpui_kit::AnyElement> {
+        let (title, version, icon_url) = self.pack.clone()?;
+        let p = cx.palette().clone();
+        let source = icon_url.as_deref().and_then(|u| Images::get(u, 64, cx));
+        let note = |text: String| {
+            div()
+                .text_size(px(type_scale::CAPTION))
+                .text_color(p.text_muted)
+                .child(text)
+        };
+        let confirm = self.confirm_pack.map(|reinstall| {
+            div()
+                .flex()
+                .items_center()
+                .gap(space(2.0))
+                .p(space(2.5))
+                .rounded(px(radius::SM))
+                .bg(if reinstall {
+                    p.danger_soft
+                } else {
+                    p.warning_soft
+                })
+                .child(
+                    div()
+                        .flex_1()
+                        .text_size(px(type_scale::SMALL))
+                        .text_color(p.text)
+                        .child(if reinstall {
+                            "Re-install? Anything you added to this instance is removed."
+                        } else {
+                            "Unlink? This can't be undone."
+                        }),
+                )
+                .child(
+                    Button::new("is-pack-no")
+                        .label("Cancel")
+                        .small()
+                        .ghost()
+                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                            this.confirm_pack = None;
+                            cx.notify();
+                        })),
+                )
+                .child({
+                    let b = Button::new("is-pack-yes")
+                        .label(if reinstall { "Re-install" } else { "Unlink" })
+                        .small();
+                    (if reinstall { b.danger() } else { b.primary() }).on_click(cx.listener(
+                        move |this, _: &ClickEvent, _, cx| {
+                            let id = this.id.clone();
+                            let state = AppState::global(cx);
+                            if reinstall {
+                                state.update(cx, |s, cx| s.reinstall_modpack(id, cx));
+                            } else {
+                                state.update(cx, |s, cx| s.unlink_modpack(id, cx));
+                            }
+                            cx.emit(DialogEvent::Close);
+                        },
+                    ))
+                })
+        });
+        Some(
+            div()
+                .flex()
+                .flex_col()
+                .gap(space(3.0))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(space(3.0))
+                        .p(space(2.5))
+                        .rounded(px(radius::MD))
+                        .bg(p.surface)
+                        .border_1()
+                        .border_color(p.border)
+                        .child(crate::ui::components::thumb(source, &title, 36.0, radius::SM, cx))
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .flex_1()
+                                .min_w_0()
+                                .child(
+                                    div()
+                                        .truncate()
+                                        .text_size(px(type_scale::BODY))
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .text_color(p.text)
+                                        .child(title.clone()),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(type_scale::SMALL))
+                                        .text_color(p.text_muted)
+                                        .child(match &version {
+                                            Some(v) => format!("Modpack · {v}"),
+                                            None => "Modpack".into(),
+                                        }),
+                                ),
+                        )
+                        .child(
+                            Button::new("is-pack-switch")
+                                .icon("arrow-left-right")
+                                .label("Switch version…")
+                                .small()
+                                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                    cx.emit(DialogEvent::SwitchModpack(this.id.clone()))
+                                })),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .gap(space(2.0))
+                        .child(
+                            Button::new("is-pack-reinstall")
+                                .icon("rotate-ccw")
+                                .label("Re-install modpack")
+                                .small()
+                                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                    this.confirm_pack = Some(true);
+                                    cx.notify();
+                                })),
+                        )
+                        .child(
+                            Button::new("is-pack-unlink")
+                                .icon("unlink")
+                                .label("Unlink modpack")
+                                .small()
+                                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                    this.confirm_pack = Some(false);
+                                    cx.notify();
+                                })),
+                        ),
+                )
+                .children(confirm)
+                .child(note(format!(
+                    "Re-install puts {title} back the way it ships (a snapshot is saved first). Unlink keeps everything installed and lets you change the Minecraft version and loader, but the pack's updates stop."
+                )))
+                .into_any_element(),
+        )
+    }
+
     fn installation(&self, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
         let p = cx.palette().clone();
         let inst = AppState::global(cx).read(cx).instance(&self.id).cloned();
@@ -307,10 +677,14 @@ impl InstanceSettings {
         }
         let modpack = inst.as_ref().is_some_and(|i| i.is_modpack);
         div()
+            .id("is-installation")
             .flex()
             .flex_col()
             .gap(space(5.0))
+            .h_full()
+            .overflow_y_scroll()
             .child(info)
+            .children(self.modpack_block(cx))
             .child(
                 div()
                     .flex()
@@ -511,7 +885,23 @@ impl Render for InstanceSettings {
                 .flex()
                 .flex_col()
                 .gap(space(5.0))
-                .child(field("Name", None, Input::new(&self.name).into_any_element()))
+                .child(
+                    div()
+                        .flex()
+                        .items_end()
+                        .gap(space(4.0))
+                        .child(div().flex_1().child(field("Name", None, Input::new(&self.name).into_any_element())))
+                        .child(self.icon_editor(cx)),
+                )
+                .child(field(
+                    "Updates",
+                    Some(match self.channel {
+                        Some(ReleaseChannel::Alpha) => "Offers every version, even early alphas. Expect things to break.".into(),
+                        Some(ReleaseChannel::Beta) => "Offers releases and betas when checking for updates.".into(),
+                        _ => "Offers only full releases when checking for updates.".into(),
+                    }),
+                    self.channel_picker(cx),
+                ))
                 .child(field(
                     "Copy or share",
                     None,
@@ -558,6 +948,7 @@ impl Render for InstanceSettings {
                             .into_any_element()
                     } else {
                         div()
+                            .flex()
                             .child(
                                 Button::new("is-delete")
                                     .icon("trash")
