@@ -541,6 +541,11 @@ impl Shell {
         self.navigate(Route::Discover, window, cx);
     }
 
+    pub fn open_profile_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let dialog = cx.new(|cx| crate::ui::profile_editor::ProfileEditor::new(window, cx));
+        self.show_dialog(dialog, cx);
+    }
+
     /// Discover's Servers tab.
     pub fn open_servers(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.discover.update(cx, |d, cx| {

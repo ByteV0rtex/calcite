@@ -354,6 +354,15 @@ fn modrinth_account(shell: &mut Shell, cx: &mut Context<Shell>) -> AnyElement {
                     ),
             )
             .child(
+                Button::new("modrinth-edit-profile")
+                    .icon("pencil")
+                    .label("Edit profile")
+                    .small()
+                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                        this.open_profile_editor(window, cx)
+                    })),
+            )
+            .child(
                 Button::new("modrinth-sign-out")
                     .icon("log-out")
                     .label("Sign out")
