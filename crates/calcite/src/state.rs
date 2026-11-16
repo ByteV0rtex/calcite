@@ -108,6 +108,19 @@ pub struct Job {
     pub total: u64,
     pub status: InstallJobStatus,
     pub error: Option<String>,
+    pub paused: bool,
+    pub can_pause: bool,
+    pub can_cancel: bool,
+}
+
+/// What can be done to a download.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum JobAction {
+    Pause,
+    Resume,
+    Retry,
+    Cancel,
+    Dismiss,
 }
 
 impl Job {
@@ -139,7 +152,19 @@ impl Job {
                         .and_then(|m| m.as_str())
                         .map(str::to_string)
                 }),
+            paused: s.paused,
+            can_pause: s.can_pause,
+            can_cancel: s.can_cancel,
         }
+    }
+
+    /// Stopped and waiting for you: paused, interrupted or failed.
+    pub fn needs_attention(&self) -> bool {
+        self.paused
+            || matches!(
+                self.status,
+                InstallJobStatus::Interrupted | InstallJobStatus::Failed
+            )
     }
 
     pub fn fraction(&self) -> f32 {
@@ -412,8 +437,20 @@ impl AppState {
                     self.logs.remove(&payload.instance_id);
                     self.running.remove(&payload.instance_id);
                     self.mark_running(payload.instance_id, Utc::now(), cx);
+                    if cx.global::<crate::prefs::Prefs>().minimize_on_launch {
+                        for window in cx.windows() {
+                            let _ = window.update(cx, |_, window, _| window.minimize_window());
+                        }
+                    }
                 }
                 ProcessPayloadType::Finished => {
+                    if cx.global::<crate::prefs::Prefs>().refocus_on_exit && self.running.len() <= 1
+                    {
+                        cx.activate(true);
+                        for window in cx.windows() {
+                            let _ = window.update(cx, |_, window, _| window.activate_window());
+                        }
+                    }
                     let started = self.running.remove(&payload.instance_id).map(|r| r.started);
                     if let Some(started) = started {
                         self.explain_crash(payload.instance_id.clone(), started, cx);
@@ -651,6 +688,56 @@ impl AppState {
         }));
     }
 
+    /// Dev builds only: sample downloads for screenshots.
+    #[cfg(feature = "snapshot")]
+    pub fn demo_jobs(&mut self, cx: &mut Context<Self>) {
+        let job = |n: u8,
+                   title: &str,
+                   status: InstallJobStatus,
+                   paused: bool,
+                   current: u64,
+                   error: Option<&str>| Job {
+            id: format!("00000000-0000-0000-0000-00000000000{n}"),
+            instance_id: None,
+            title: title.to_string().into(),
+            phase: "Downloading mods",
+            current,
+            total: 100,
+            status,
+            error: error.map(str::to_string),
+            paused,
+            can_pause: true,
+            can_cancel: true,
+        };
+        self.jobs = vec![
+            job(
+                1,
+                "Fabulously Optimized",
+                InstallJobStatus::Running,
+                false,
+                62,
+                None,
+            ),
+            job(
+                2,
+                "Create: Above and Beyond",
+                InstallJobStatus::Running,
+                true,
+                30,
+                None,
+            ),
+            job(
+                3,
+                "Better MC",
+                InstallJobStatus::Failed,
+                false,
+                0,
+                Some("A download failed: connection reset"),
+            ),
+        ];
+        cx.notify();
+    }
+
     /// Dev builds only: sample friends for screenshots.
     #[cfg(feature = "snapshot")]
     pub fn demo_friends(&mut self, cx: &mut Context<Self>) {
@@ -681,6 +768,123 @@ impl AppState {
             friend("Ines", true, false, false, None),
         ];
         cx.notify();
+    }
+
+    /// Pause, resume, retry, cancel or dismiss a download.
+    pub fn job_action(&mut self, job_id: String, action: JobAction, cx: &mut Context<Self>) {
+        let Ok(uuid) = uuid::Uuid::parse_str(&job_id) else {
+            return;
+        };
+        if action == JobAction::Dismiss {
+            self.jobs.retain(|j| j.id != job_id);
+        }
+        let task = Backend::global(cx).call(async move {
+            match action {
+                JobAction::Pause => theseus::install::pause_job(uuid).await.map(|_| ()),
+                JobAction::Resume => theseus::install::resume_job(uuid).await.map(|_| ()),
+                JobAction::Retry => theseus::install::retry_job(uuid).await.map(|_| ()),
+                JobAction::Cancel => theseus::install::cancel_job(uuid).await.map(|_| ()),
+                JobAction::Dismiss => theseus::install::dismiss_job(uuid).await,
+            }
+        });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| {
+                if let Err(error) = result {
+                    this.notify_error("Couldn't change that download", format!("{error:#}"));
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// Put instances into a group (`add`) and/or take them out of one.
+    pub fn regroup(
+        &mut self,
+        ids: Vec<String>,
+        add: Option<String>,
+        remove: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let updates: Vec<theseus::instance::InstanceGroupMembershipUpdate> = ids
+            .iter()
+            .filter_map(|id| self.instance(id))
+            .map(|inst| {
+                let mut groups: Vec<String> = inst
+                    .group_ids
+                    .iter()
+                    .filter(|g| Some(*g) != remove.as_ref())
+                    .cloned()
+                    .collect();
+                if let Some(add) = &add
+                    && !groups.contains(add)
+                {
+                    groups.push(add.clone());
+                }
+                theseus::instance::InstanceGroupMembershipUpdate {
+                    instance_id: inst.id.clone(),
+                    group_ids: groups,
+                }
+            })
+            .collect();
+        let task = Backend::global(cx)
+            .call(async move { theseus::instance::set_group_memberships(updates).await });
+        self.after_library_change(task, "Couldn't change the groups", cx);
+    }
+
+    /// Make a group and put these instances in it.
+    pub fn group_into_new(&mut self, name: String, ids: Vec<String>, cx: &mut Context<Self>) {
+        let backend = Backend::global(cx).clone();
+        cx.spawn(async move |this, cx| {
+            let created = backend
+                .call(async move { theseus::instance::create_group(name).await })
+                .await;
+            let _ = this.update(cx, |this, cx| match created {
+                Ok(group) => this.regroup(ids, Some(group.id), None, cx),
+                Err(error) => {
+                    this.notify_error("Couldn't make that group", format!("{error:#}"));
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    pub fn delete_group(&mut self, id: String, cx: &mut Context<Self>) {
+        let task =
+            Backend::global(cx).call(async move { theseus::instance::delete_group(id).await });
+        self.after_library_change(task, "Couldn't delete that group", cx);
+    }
+
+    /// Delete instances (and everything in their folders).
+    pub fn delete_instances(&mut self, ids: Vec<String>, cx: &mut Context<Self>) {
+        let task = Backend::global(cx).call(async move {
+            for id in ids {
+                theseus::instance::remove(&id).await?;
+            }
+            Ok(())
+        });
+        self.after_library_change(task, "Couldn't delete everything", cx);
+    }
+
+    fn after_library_change(
+        &mut self,
+        task: impl Future<Output = anyhow::Result<()>> + 'static,
+        failure: &'static str,
+        cx: &mut Context<Self>,
+    ) {
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| {
+                if let Err(error) = result {
+                    this.notify_error(failure, format!("{error:#}"));
+                }
+                this.refresh_all(cx);
+            });
+        })
+        .detach();
     }
 
     /// Send a friend request, or accept one.

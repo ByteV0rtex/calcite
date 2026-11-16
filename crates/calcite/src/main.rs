@@ -137,7 +137,11 @@ fn main() {
                             std::env::var("CALCITE_SNAPSHOT_USER")
                                 .unwrap_or_else(|_| "jellysquid3".into()),
                         ),
-                        _ => Route::Home,
+                        "home" => Route::Home,
+                        _ => match cx.global::<prefs::Prefs>().start_page {
+                            prefs::StartPage::Home => Route::Home,
+                            prefs::StartPage::Library => Route::Library,
+                        },
                     };
                     let shell = cx.new(|cx| Shell::new(start, window, cx));
                     cx.new(|cx| Root::new(shell, window, cx))
@@ -176,7 +180,8 @@ fn take_snapshot(window: gpui_kit::AnyWindowHandle, page: String, out: String, c
                 match (page.as_str(), first) {
                     (
                         "instance" | "instance-logs" | "instance-worlds" | "instance-shots"
-                        | "instance-snapshots" | "instance-settings" | "instance-health",
+                        | "instance-snapshots" | "instance-settings" | "instance-health"
+                        | "instance-files",
                         Some(id),
                     ) => {
                         use ui::pages::instance::Tab;
@@ -188,6 +193,7 @@ fn take_snapshot(window: gpui_kit::AnyWindowHandle, page: String, out: String, c
                             "instance-worlds" => Some(Tab::Worlds),
                             "instance-shots" => Some(Tab::Screenshots),
                             "instance-snapshots" => Some(Tab::Snapshots),
+                            "instance-files" => Some(Tab::Files),
                             "instance-health" => Some(Tab::Health),
                             _ => None,
                         };
@@ -257,6 +263,10 @@ fn take_snapshot(window: gpui_kit::AnyWindowHandle, page: String, out: String, c
                     });
                     continue;
                 }
+                if word == "demo-jobs" {
+                    cx.update(|cx| AppState::global(cx).update(cx, |s, cx| s.demo_jobs(cx)));
+                    continue;
+                }
                 if word == "demo-friends" {
                     cx.update(|cx| AppState::global(cx).update(cx, |s, cx| s.demo_friends(cx)));
                     continue;
@@ -272,6 +282,12 @@ fn take_snapshot(window: gpui_kit::AnyWindowHandle, page: String, out: String, c
                         }
                         if let Some(text) = word.strip_prefix("search=") {
                             shell.type_search(text, window, cx);
+                        }
+                        if word == "open-downloads" {
+                            shell.open_downloads(cx);
+                        }
+                        if word.starts_with("lib-") {
+                            shell.dev_library(&word, cx);
                         }
                         if word == "change-version" {
                             let id = std::env::var("CALCITE_SNAPSHOT_INSTANCE").unwrap_or_default();
@@ -295,6 +311,9 @@ fn take_snapshot(window: gpui_kit::AnyWindowHandle, page: String, out: String, c
                             "broken" => p.answer_bisect(true, cx),
                             "stop" => p.finish_bisect(Vec::new(), cx),
                             "share" => cx.emit(ui::pages::instance::InstancePageEvent::Share(p.id().to_string())),
+                            w if w.starts_with("open-file=") => {
+                                p.open_file(w.trim_start_matches("open-file=").to_string(), cx)
+                            }
                             "play" => {
                                 let id = p.id().to_string();
                                 p.state().update(cx, |s, cx| s.play(&id, cx));

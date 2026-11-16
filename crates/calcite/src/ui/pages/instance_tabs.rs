@@ -17,6 +17,7 @@ use crate::ui::components::{
     Button, chip, empty_state, icon, icon_chip, relative_time, skeleton, state_chip,
 };
 use crate::ui::pages::instance::{InstancePage, InstancePageEvent};
+use gpui_kit::component::menu::{ContextMenuExt, PopupMenu, PopupMenuItem};
 
 #[derive(Clone, Debug)]
 pub struct WorldRow {
@@ -65,6 +66,8 @@ pub struct Extra {
     pub bisect: Option<(calcite_core::bisect::Bisect, calcite_core::bisect::Step)>,
     /// Live status by server address.
     pub servers: std::collections::HashMap<String, ServerPing>,
+    /// A world waiting for "Delete forever?" confirmation (its folder).
+    pub confirm_world: Option<String>,
 }
 
 pub fn snapshots_dir(instance_id: &str) -> Option<PathBuf> {
@@ -147,6 +150,44 @@ impl InstancePage {
                     Err(error) => this.extra.worlds = Some(Err(format!("{error:#}"))),
                 }
                 cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    pub(crate) fn delete_world(&mut self, dir: PathBuf, folder: String, cx: &mut Context<Self>) {
+        let task = Backend::global(cx)
+            .call(async move { theseus::worlds::delete_world(&dir, &folder).await });
+        self.after_world_change(task, "Couldn't delete that world", cx);
+    }
+
+    pub(crate) fn reset_world_icon(
+        &mut self,
+        dir: PathBuf,
+        folder: String,
+        cx: &mut Context<Self>,
+    ) {
+        let task = Backend::global(cx)
+            .call(async move { theseus::worlds::reset_world_icon(&dir, &folder).await });
+        self.after_world_change(task, "Couldn't reset the icon", cx);
+    }
+
+    fn after_world_change(
+        &mut self,
+        task: impl Future<Output = anyhow::Result<()>> + 'static,
+        failure: &'static str,
+        cx: &mut Context<Self>,
+    ) {
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| {
+                if let Err(error) = result {
+                    this.state().update(cx, |s, cx| {
+                        s.notify_error(failure, format!("{error:#}"));
+                        cx.notify();
+                    });
+                }
+                this.load_worlds(cx);
             });
         })
         .detach();
@@ -366,7 +407,7 @@ impl InstancePage {
         .detach();
     }
 
-    fn backup_world(&mut self, world: WorldRow, cx: &mut Context<Self>) {
+    pub(crate) fn backup_world(&mut self, world: WorldRow, cx: &mut Context<Self>) {
         let Some(dir) = self.extra.instance_dir.clone() else {
             return;
         };
@@ -462,8 +503,60 @@ impl InstancePage {
             let when = world.last_played.map(relative_time).unwrap_or_default();
             let (play_world, backup, open_dir) = (world.clone(), world.clone(), dir.clone());
             let play_id = instance_id.clone();
+            let menu = world_menu(&world, dir.clone(), cx.entity().downgrade());
+            let confirming =
+                !world.server && self.extra.confirm_world.as_deref() == Some(world.key.as_str());
+            if confirming {
+                let (delete_key, delete_dir) = (world.key.clone(), dir.clone());
+                list = list.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(space(3.0))
+                        .h(px(60.0))
+                        .px(space(3.0))
+                        .border_b_1()
+                        .border_color(p.border)
+                        .bg(p.danger_soft)
+                        .child(icon("trash", 16.0, p.danger))
+                        .child(
+                            div()
+                                .flex_1()
+                                .text_size(px(type_scale::BODY))
+                                .text_color(p.text)
+                                .child(format!(
+                                    "Delete \"{}\" forever? Back it up first if you might want it.",
+                                    world.name
+                                )),
+                        )
+                        .child(
+                            Button::new(SharedString::from(format!("world-delete-yes-{ix}")))
+                                .label("Delete")
+                                .danger()
+                                .small()
+                                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                    this.extra.confirm_world = None;
+                                    if let Some(dir) = delete_dir.clone() {
+                                        this.delete_world(dir, delete_key.clone(), cx);
+                                    }
+                                })),
+                        )
+                        .child(
+                            Button::new(SharedString::from(format!("world-delete-no-{ix}")))
+                                .label("Keep")
+                                .ghost()
+                                .small()
+                                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                    this.extra.confirm_world = None;
+                                    cx.notify();
+                                })),
+                        ),
+                );
+                continue;
+            }
             list = list.child(
                 div()
+                    .id(SharedString::from(format!("world-row-{ix}")))
                     .flex()
                     .items_center()
                     .gap(space(3.0))
@@ -571,7 +664,7 @@ impl InstancePage {
                         d.child(status)
                             .child(
                                 Button::new(SharedString::from(format!("server-edit-{ix}")))
-                                    .icon("settings")
+                                    .icon("pencil")
                                     .ghost()
                                     .small()
                                     .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
@@ -641,7 +734,8 @@ impl InstancePage {
                                     })
                                 }),
                         )
-                    }),
+                    })
+                    .context_menu(menu),
             );
         }
         let add_bar = div()
@@ -970,4 +1064,83 @@ fn latency_chip(ms: i64, cx: &App) -> gpui_kit::Div {
         (p.danger, p.danger_soft)
     };
     state_chip(format!("{ms} ms"), fg, bg)
+}
+
+/// Right-click menu for a world or server row.
+fn world_menu(
+    world: &WorldRow,
+    dir: Option<PathBuf>,
+    page: gpui_kit::WeakEntity<InstancePage>,
+) -> impl Fn(PopupMenu, &mut gpui_kit::Window, &mut Context<PopupMenu>) -> PopupMenu + 'static {
+    let world = world.clone();
+    move |menu, _window, _cx| {
+        let (w, d, pg) = (world.clone(), dir.clone(), page.clone());
+        if w.server {
+            let address = w.key.clone();
+            let (edit_page, remove_page) = (pg.clone(), pg.clone());
+            let edit = crate::ui::server_dialog::Existing {
+                index: w.index.unwrap_or(0),
+                name: w.name.to_string(),
+                address: w.key.clone(),
+                pack: w.pack.clone(),
+            };
+            let remove_index = w.index;
+            return menu
+                .item(
+                    PopupMenuItem::new("Copy address").on_click(move |_, _, cx| {
+                        cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(address.clone()));
+                    }),
+                )
+                .item(PopupMenuItem::new("Edit…").on_click(move |_, _, cx| {
+                    let edit = edit.clone();
+                    let _ = edit_page.update(cx, |p, cx| {
+                        cx.emit(InstancePageEvent::Server(p.id().to_string(), Some(edit)))
+                    });
+                }))
+                .separator()
+                .item(
+                    PopupMenuItem::new("Remove from list").on_click(move |_, _, cx| {
+                        if let Some(index) = remove_index {
+                            let _ = remove_page.update(cx, |p, cx| p.remove_server(index, cx));
+                        }
+                    }),
+                );
+        }
+        let (rename_page, icon_page, backup_page, delete_page) =
+            (pg.clone(), pg.clone(), pg.clone(), pg.clone());
+        let (rename_w, icon_w, backup_w, delete_w, folder_w) =
+            (w.clone(), w.clone(), w.clone(), w.clone(), w.clone());
+        let (rename_d, icon_d, folder_d) = (d.clone(), d.clone(), d.clone());
+        menu.item(PopupMenuItem::new("Rename…").on_click(move |_, _, cx| {
+            if let Some(dir) = rename_d.clone() {
+                let (key, name) = (rename_w.key.clone(), rename_w.name.to_string());
+                let _ = rename_page.update(cx, |_, cx| {
+                    cx.emit(InstancePageEvent::RenameWorld(dir, key, name))
+                });
+            }
+        }))
+        .item(PopupMenuItem::new("Reset icon").on_click(move |_, _, cx| {
+            if let Some(dir) = icon_d.clone() {
+                let key = icon_w.key.clone();
+                let _ = icon_page.update(cx, |p, cx| p.reset_world_icon(dir, key, cx));
+            }
+        }))
+        .item(PopupMenuItem::new("Open folder").on_click(move |_, _, cx| {
+            if let Some(dir) = &folder_d {
+                cx.open_with_system(&dir.join("saves").join(&folder_w.key));
+            }
+        }))
+        .item(PopupMenuItem::new("Back up now").on_click(move |_, _, cx| {
+            let w = backup_w.clone();
+            let _ = backup_page.update(cx, |p, cx| p.backup_world(w, cx));
+        }))
+        .separator()
+        .item(PopupMenuItem::new("Delete…").on_click(move |_, _, cx| {
+            let key = delete_w.key.clone();
+            let _ = delete_page.update(cx, |p, cx| {
+                p.extra.confirm_world = Some(key);
+                cx.notify();
+            });
+        }))
+    }
 }

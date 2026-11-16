@@ -1,4 +1,5 @@
 pub mod discover;
+pub mod files_tab;
 pub mod gallery;
 pub mod game_settings;
 pub mod health_tab;

@@ -141,7 +141,8 @@ pub fn render(
                     Some("Used for Play, progress and anything that needs your attention."),
                     accent_picker(cx).into_any_element(),
                     cx,
-                )),
+                ))
+                .child(group("Behavior", None, behavior(cx), cx)),
         ),
         Section::Accounts => accounts(shell, cx),
         Section::About => about(cx),
@@ -386,6 +387,138 @@ fn modrinth_account(shell: &mut Shell, cx: &mut Context<Shell>) -> AnyElement {
             ),
     };
     panel(cx).overflow_hidden().child(body).into_any_element()
+}
+
+/// Switches for how Calcite behaves around the game.
+fn behavior(cx: &mut Context<Shell>) -> AnyElement {
+    use crate::prefs::{Prefs, StartPage};
+    let p = cx.palette().clone();
+    let prefs = cx.global::<Prefs>().clone();
+    let row = |id: &'static str,
+               title: &'static str,
+               detail: &'static str,
+               on: bool,
+               flip: fn(&mut Prefs),
+               cx: &mut Context<Shell>| {
+        div()
+            .id(id)
+            .flex()
+            .items_center()
+            .gap(space(3.0))
+            .px(space(4.0))
+            .py(space(3.0))
+            .cursor_pointer()
+            .hover(|s| s.bg(p.hover))
+            .on_click(move |_, _, cx| {
+                let prefs = cx.global_mut::<Prefs>();
+                flip(prefs);
+                prefs.save();
+                cx.refresh_windows();
+            })
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .child(
+                        div()
+                            .text_size(px(type_scale::BODY))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(p.text)
+                            .child(title),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(type_scale::SMALL))
+                            .text_color(p.text_muted)
+                            .child(detail),
+                    ),
+            )
+            .child(crate::ui::pages::instance::toggle(on, cx))
+    };
+    let start = |page: StartPage, label: &'static str| {
+        let active = prefs.start_page == page;
+        div()
+            .id(SharedString::from(format!("start-{label}")))
+            .h(px(28.0))
+            .px(space(2.5))
+            .flex()
+            .items_center()
+            .rounded(px(radius::SM))
+            .border_1()
+            .text_size(px(type_scale::SMALL))
+            .when(active, |d| {
+                d.border_color(p.accent)
+                    .bg(p.accent_soft)
+                    .text_color(p.text)
+            })
+            .when(!active, |d| {
+                d.border_color(p.border)
+                    .text_color(p.text_secondary)
+                    .cursor_pointer()
+                    .hover(|s| s.bg(p.hover))
+            })
+            .on_click(move |_, _, cx| {
+                let prefs = cx.global_mut::<Prefs>();
+                prefs.start_page = page;
+                prefs.save();
+                cx.refresh_windows();
+            })
+            .child(label)
+    };
+    panel(cx)
+        .overflow_hidden()
+        .child(row(
+            "pref-minimize",
+            "Minimize when the game starts",
+            "Calcite gets out of the way while you play.",
+            prefs.minimize_on_launch,
+            |p| p.minimize_on_launch = !p.minimize_on_launch,
+            cx,
+        ))
+        .child(div().h(px(1.0)).bg(p.border))
+        .child(row(
+            "pref-refocus",
+            "Come back when the game closes",
+            "Bring Calcite to the front after you quit Minecraft.",
+            prefs.refocus_on_exit,
+            |p| p.refocus_on_exit = !p.refocus_on_exit,
+            cx,
+        ))
+        .child(div().h(px(1.0)).bg(p.border))
+        .child(row(
+            "pref-backups",
+            "Back up worlds when the game closes",
+            "Keeps the last few copies of each world you played.",
+            prefs.backup_worlds_on_exit,
+            |p| p.backup_worlds_on_exit = !p.backup_worlds_on_exit,
+            cx,
+        ))
+        .child(div().h(px(1.0)).bg(p.border))
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(space(3.0))
+                .px(space(4.0))
+                .py(space(3.0))
+                .child(
+                    div()
+                        .flex_1()
+                        .text_size(px(type_scale::BODY))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(p.text)
+                        .child("Open Calcite on"),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .gap(space(1.5))
+                        .child(start(StartPage::Home, "Home"))
+                        .child(start(StartPage::Library, "Library")),
+                ),
+        )
+        .into_any_element()
 }
 
 fn about(cx: &mut Context<Shell>) -> AnyElement {

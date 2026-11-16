@@ -23,6 +23,7 @@ use crate::ui::pages::move_in::MoveInPage;
 use crate::ui::pages::project::{ProjectEvent, ProjectPage};
 use crate::ui::pages::settings::{self, Section as SettingsSection};
 use crate::ui::pages::{discover::DiscoverPage, gallery, home, library};
+use theseus::install::InstallJobStatus;
 
 /// Width of the left sidebar.
 pub const SIDEBAR_WIDTH: f32 = 228.0;
@@ -49,24 +50,88 @@ pub enum LibrarySort {
     #[default]
     LastPlayed,
     Name,
+    Played,
     Created,
+    GameVersion,
+    Loader,
 }
 
 impl LibrarySort {
+    pub const ALL: [LibrarySort; 6] = [
+        LibrarySort::LastPlayed,
+        LibrarySort::Name,
+        LibrarySort::Played,
+        LibrarySort::Created,
+        LibrarySort::GameVersion,
+        LibrarySort::Loader,
+    ];
     pub fn label(self) -> &'static str {
         match self {
             LibrarySort::LastPlayed => "Last played",
             LibrarySort::Name => "Name",
+            LibrarySort::Played => "Hours played",
             LibrarySort::Created => "Date created",
+            LibrarySort::GameVersion => "Game version",
+            LibrarySort::Loader => "Loader",
         }
     }
-    fn next(self) -> Self {
+}
+
+/// How the Library splits instances into sections.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum LibraryGroup {
+    #[default]
+    Groups,
+    Loader,
+    GameVersion,
+    Kind,
+    None,
+}
+
+impl LibraryGroup {
+    pub const ALL: [LibraryGroup; 5] = [
+        LibraryGroup::Groups,
+        LibraryGroup::Loader,
+        LibraryGroup::GameVersion,
+        LibraryGroup::Kind,
+        LibraryGroup::None,
+    ];
+    pub fn label(self) -> &'static str {
         match self {
-            LibrarySort::LastPlayed => LibrarySort::Name,
-            LibrarySort::Name => LibrarySort::Created,
-            LibrarySort::Created => LibrarySort::LastPlayed,
+            LibraryGroup::Groups => "Your groups",
+            LibraryGroup::Loader => "Loader",
+            LibraryGroup::GameVersion => "Game version",
+            LibraryGroup::Kind => "Type",
+            LibraryGroup::None => "No grouping",
         }
     }
+}
+
+/// Which instances the Library shows by kind.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum KindFilter {
+    #[default]
+    All,
+    Modpacks,
+    Custom,
+    Shared,
+}
+
+/// Library view state (kept while the app runs).
+#[derive(Default)]
+pub struct LibraryView {
+    pub sort: LibrarySort,
+    pub group: LibraryGroup,
+    pub kind: KindFilter,
+    pub loader: Option<theseus::data::ModLoader>,
+    pub show_hidden: bool,
+    pub selecting: bool,
+    pub selected: std::collections::HashSet<String>,
+    pub confirm_delete: bool,
+    /// Which toolbar menu is open ("sort", "group", "add-to-group").
+    pub menu: Option<&'static str>,
+    /// Name field for "New group" from the selection bar.
+    pub new_group: Option<Entity<InputState>>,
 }
 
 pub struct Shell {
@@ -89,8 +154,9 @@ pub struct Shell {
     /// "Change version" asked for from instance settings; opened on the
     /// next render (it needs the window).
     pending_change_version: Option<String>,
-    pub library_sort: LibrarySort,
+    pub library: LibraryView,
     account_menu_open: bool,
+    downloads_open: bool,
     all_friends: bool,
     user_page: Option<Entity<crate::ui::pages::user::UserPage>>,
     onboarding_step: Option<usize>,
@@ -157,8 +223,9 @@ impl Shell {
             library_filter,
             global_search,
             pending_change_version: None,
-            library_sort: LibrarySort::LastPlayed,
+            library: LibraryView::default(),
             account_menu_open: false,
+            downloads_open: false,
             all_friends: false,
             user_page: None,
             onboarding_step: (!cx.global::<crate::prefs::Prefs>().onboarding_done).then_some(0),
@@ -196,6 +263,18 @@ impl Shell {
                                 crate::ui::server_dialog::ServerDialog::new(
                                     id.clone(),
                                     existing.clone(),
+                                    window,
+                                    cx,
+                                )
+                            });
+                            this.show_dialog(dialog, cx);
+                        }
+                        InstancePageEvent::RenameWorld(dir, folder, name) => {
+                            let dialog = cx.new(|cx| {
+                                crate::ui::rename_world::RenameWorldDialog::new(
+                                    dir.clone(),
+                                    folder.clone(),
+                                    name.clone(),
                                     window,
                                     cx,
                                 )
@@ -446,6 +525,38 @@ impl Shell {
             .update(cx, |d, cx| d.search_for(text, window, cx));
     }
 
+    /// Dev hook: expand the downloads panel.
+    #[cfg_attr(not(feature = "snapshot"), allow(dead_code))]
+    pub fn open_downloads(&mut self, cx: &mut Context<Self>) {
+        self.downloads_open = true;
+        cx.notify();
+    }
+
+    /// Dev hook: set Library view options by name.
+    #[cfg_attr(not(feature = "snapshot"), allow(dead_code))]
+    pub fn dev_library(&mut self, word: &str, cx: &mut Context<Self>) {
+        match word {
+            "lib-select" => {
+                self.library.selecting = true;
+                let ids: Vec<String> = self
+                    .state
+                    .read(cx)
+                    .instances
+                    .iter()
+                    .take(3)
+                    .map(|i| i.id.clone())
+                    .collect();
+                self.library.selected = ids.into_iter().collect();
+            }
+            "lib-sort-menu" => self.library.menu = Some("sort"),
+            "lib-group-loader" => self.library.group = LibraryGroup::Loader,
+            "lib-compact" => crate::prefs::Prefs::set_compact(true, cx),
+            "lib-cards" => crate::prefs::Prefs::set_compact(false, cx),
+            _ => {}
+        }
+        cx.notify();
+    }
+
     /// Dev hook: open "Change version" for an instance.
     #[cfg_attr(not(feature = "snapshot"), allow(dead_code))]
     pub fn request_change_version(&mut self, id: String, cx: &mut Context<Self>) {
@@ -482,11 +593,6 @@ impl Shell {
         if let Some(page) = &self.instance_page {
             page.update(cx, f);
         }
-    }
-
-    pub fn cycle_sort(&mut self, cx: &mut Context<Self>) {
-        self.library_sort = self.library_sort.next();
-        cx.notify();
     }
 
     fn instance_title(&self, cx: &App) -> SharedString {
@@ -837,15 +943,17 @@ impl Shell {
     }
 
     fn download_card(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        use crate::state::JobAction;
         let p = cx.palette().clone();
         let state = self.state.read(cx);
         let jobs: Vec<_> = state
             .jobs
             .iter()
-            .filter(|j| j.is_active())
+            .filter(|j| j.is_active() || j.needs_attention())
             .cloned()
             .collect();
         let job = jobs.first()?.clone();
+        let waiting = jobs.iter().filter(|j| j.needs_attention()).count();
         let extra = jobs.len().saturating_sub(1);
         let title: SharedString = if extra > 0 {
             format!("{} +{extra}", job.title).into()
@@ -857,27 +965,152 @@ impl Shell {
         } else {
             String::new()
         };
-        let target = job.instance_id.clone();
-        Some(
+        let open = self.downloads_open;
+
+        let job_row = |ix: usize, job: &crate::state::Job, cx: &mut Context<Self>| {
+            let status: SharedString = if job.paused {
+                "Paused".into()
+            } else {
+                match job.status {
+                    InstallJobStatus::Failed => {
+                        job.error.clone().unwrap_or_else(|| "Failed".into()).into()
+                    }
+                    InstallJobStatus::Interrupted => "Interrupted; resume to finish".into(),
+                    _ => job.phase.into(),
+                }
+            };
+            let mut actions: Vec<(JobAction, &'static str)> = Vec::new();
+            if job.paused || job.status == InstallJobStatus::Interrupted {
+                actions.push((JobAction::Resume, "play"));
+            } else if job.is_active() && job.can_pause {
+                actions.push((JobAction::Pause, "pause"));
+            }
+            if job.status == InstallJobStatus::Failed {
+                actions.push((JobAction::Retry, "rotate-ccw"));
+            }
+            if job.can_cancel && (job.is_active() || job.paused) {
+                actions.push((JobAction::Cancel, "x"));
+            } else if !job.is_active() {
+                actions.push((JobAction::Dismiss, "x"));
+            }
+            let target = job.instance_id.clone();
             div()
-                .id("download-card")
-                .mx(space(2.0))
-                .mb(space(2.0))
-                .p(space(2.5))
-                .rounded(px(radius::MD))
-                .bg(p.surface)
-                .border_1()
-                .border_color(p.border)
                 .flex()
                 .flex_col()
-                .gap(space(2.0))
-                .when_some(target, |d, id| {
-                    d.cursor_pointer()
-                        .hover(|s| s.border_color(p.border_strong))
-                        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                            this.navigate(Route::Instance(id.clone()), window, cx)
-                        }))
+                .gap(space(1.5))
+                .py(space(2.0))
+                .when(ix > 0, |d| d.border_t_1().border_color(p.border))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(space(1.0))
+                        .child(
+                            div()
+                                .id(SharedString::from(format!("job-title-{ix}")))
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .text_size(px(type_scale::SMALL))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(p.text)
+                                .when_some(target, |d, id| {
+                                    d.cursor_pointer()
+                                        .hover(|s| s.text_color(p.accent))
+                                        .on_click(cx.listener(
+                                            move |this, _: &ClickEvent, window, cx| {
+                                                this.navigate(
+                                                    Route::Instance(id.clone()),
+                                                    window,
+                                                    cx,
+                                                )
+                                            },
+                                        ))
+                                })
+                                .child(job.title.clone()),
+                        )
+                        .children(actions.into_iter().map(|(action, glyph)| {
+                            let id = job.id.clone();
+                            Button::new(SharedString::from(format!("job-{ix}-{action:?}")))
+                                .icon(glyph)
+                                .ghost()
+                                .small()
+                                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                    let id = id.clone();
+                                    this.state.update(cx, |s, cx| s.job_action(id, action, cx));
+                                }))
+                        })),
+                )
+                .when(job.is_active() && !job.paused, |d| {
+                    d.child(progress_bar(job.fraction(), cx))
                 })
+                .child(
+                    div()
+                        .text_size(px(type_scale::CAPTION))
+                        .text_color(if job.status == InstallJobStatus::Failed {
+                            p.danger
+                        } else {
+                            p.text_muted
+                        })
+                        .child(status),
+                )
+        };
+
+        let mut card = div()
+            .id("download-card")
+            .mx(space(2.0))
+            .mb(space(2.0))
+            .p(space(2.5))
+            .rounded(px(radius::MD))
+            .bg(p.surface)
+            .border_1()
+            .border_color(if waiting > 0 {
+                p.warning_soft
+            } else {
+                p.border
+            })
+            .flex()
+            .flex_col()
+            .gap(space(2.0));
+        if open {
+            card = card.child(
+                div()
+                    .id("downloads-close")
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .cursor_pointer()
+                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                        this.downloads_open = false;
+                        cx.notify();
+                    }))
+                    .child(
+                        div()
+                            .text_size(px(type_scale::CAPTION))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(p.text_muted)
+                            .child(format!("Downloads · {}", jobs.len())),
+                    )
+                    .child(icon("chevron-down", 14.0, p.text_muted)),
+            );
+            let mut list = div()
+                .id("downloads-list")
+                .flex()
+                .flex_col()
+                .max_h(px(320.0))
+                .overflow_y_scroll();
+            for (ix, job) in jobs.iter().enumerate() {
+                list = list.child(job_row(ix, job, cx));
+            }
+            card = card.child(list);
+        } else {
+            card = card
+                .cursor_pointer()
+                .hover(|s| s.border_color(p.border_strong))
+                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                    this.downloads_open = true;
+                    cx.notify();
+                }))
                 .child(
                     div()
                         .flex()
@@ -890,7 +1123,15 @@ impl Shell {
                                 .items_center()
                                 .gap(space(2.0))
                                 .min_w_0()
-                                .child(icon("arrow-down-to-line", 14.0, p.accent))
+                                .child(icon(
+                                    if waiting > 0 {
+                                        "triangle-alert"
+                                    } else {
+                                        "arrow-down-to-line"
+                                    },
+                                    14.0,
+                                    if waiting > 0 { p.warning } else { p.accent },
+                                ))
                                 .child(
                                     div()
                                         .truncate()
@@ -908,14 +1149,21 @@ impl Shell {
                                 .child(percent),
                         ),
                 )
-                .child(progress_bar(job.fraction(), cx))
+                .when(job.is_active() && !job.paused, |d| {
+                    d.child(progress_bar(job.fraction(), cx))
+                })
                 .child(
                     div()
                         .text_size(px(type_scale::CAPTION))
                         .text_color(p.text_muted)
-                        .child(job.phase),
-                ),
-        )
+                        .child(if waiting > 0 {
+                            format!("{waiting} waiting for you · click to see")
+                        } else {
+                            job.phase.to_string()
+                        }),
+                );
+        }
+        Some(card)
     }
 
     fn account_menu(&self, cx: &mut Context<Self>) -> impl IntoElement {

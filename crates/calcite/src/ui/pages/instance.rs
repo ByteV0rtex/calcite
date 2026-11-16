@@ -25,6 +25,7 @@ pub enum Tab {
     Worlds,
     Screenshots,
     Snapshots,
+    Files,
     Logs,
 }
 
@@ -113,6 +114,8 @@ pub enum InstancePageEvent {
     Share(String),
     /// Add (None) or edit a server in this instance's list.
     Server(String, Option<crate::ui::server_dialog::Existing>),
+    /// Rename a world: instance folder, world folder, current name.
+    RenameWorld(std::path::PathBuf, String, String),
 }
 
 impl gpui_kit::EventEmitter<InstancePageEvent> for InstancePage {}
@@ -134,6 +137,7 @@ pub struct InstancePage {
     /// Changes the owner published that this copy doesn't have yet
     /// (shared instances you joined).
     shared_update: Option<usize>,
+    files: Option<Entity<crate::ui::pages::files_tab::FilesBrowser>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -178,6 +182,7 @@ impl InstancePage {
             pack_rows: Vec::new(),
             pack_loading: false,
             shared_update: None,
+            files: None,
             _subscriptions: subscriptions,
         };
         page.load_content(cx);
@@ -334,6 +339,15 @@ impl InstancePage {
         &self.id
     }
 
+    /// Dev hook: open a file in the Files tab.
+    #[cfg_attr(not(feature = "snapshot"), allow(dead_code))]
+    pub(crate) fn open_file(&mut self, path: String, cx: &mut Context<Self>) {
+        self.set_tab(Tab::Files, cx);
+        if let Some(files) = &self.files {
+            files.update(cx, |f, cx| f.open_path(path, cx));
+        }
+    }
+
     pub fn set_tab(&mut self, tab: Tab, cx: &mut Context<Self>) {
         self.tab = tab;
         match tab {
@@ -341,6 +355,14 @@ impl InstancePage {
             Tab::Health => self.load_health(cx),
             Tab::Screenshots => self.load_shots(cx),
             Tab::Snapshots => self.load_snapshots(cx),
+            Tab::Files => match &self.files {
+                Some(files) => files.update(cx, |f, cx| f.load(cx)),
+                None => {
+                    let id = self.id.clone();
+                    self.files =
+                        Some(cx.new(|cx| crate::ui::pages::files_tab::FilesBrowser::new(id, cx)));
+                }
+            },
             _ => {}
         }
         cx.notify();
@@ -790,6 +812,7 @@ impl InstancePage {
             (Tab::Worlds, "Worlds", None),
             (Tab::Screenshots, "Screenshots", None),
             (Tab::Snapshots, "Snapshots", None),
+            (Tab::Files, "Files", None),
             (Tab::Logs, "Logs", None),
         ] {
             let active = tab == self.tab;
@@ -1333,6 +1356,10 @@ impl Render for InstancePage {
             Tab::Health => self.health_tab(cx),
             Tab::Screenshots => self.shots_tab(cx),
             Tab::Snapshots => self.snapshots_tab(cx),
+            Tab::Files => match &self.files {
+                Some(files) => files.clone().into_any_element(),
+                None => div().into_any_element(),
+            },
             Tab::Logs => self.logs_tab(cx),
         };
         div()
