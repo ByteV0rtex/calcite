@@ -250,6 +250,9 @@ pub struct AppState {
     /// Game folders to bring into an instance once its install job succeeds
     /// (official launcher imports), keyed by job id.
     pending_copies: HashMap<String, (PathBuf, Option<PathBuf>)>,
+    /// Install jobs making an instance for a listed server: join it
+    /// (name, address) once the install finishes.
+    pending_joins: HashMap<String, (String, String)>,
     /// Bumped whenever an instance's content changes, so open pages reload.
     pub content_revision: HashMap<String, u64>,
     /// Project ids being installed per instance (for "Installing…" buttons).
@@ -329,6 +332,7 @@ impl AppState {
             logs: HashMap::new(),
             notice: None,
             pending_copies: HashMap::new(),
+            pending_joins: HashMap::new(),
             content_revision: HashMap::new(),
             installing: HashMap::new(),
             modrinth: None,
@@ -487,6 +491,12 @@ impl AppState {
                     None => self.jobs.push(job.clone()),
                 }
                 if finished {
+                    if let Some((name, address)) = self.pending_joins.remove(&job.id)
+                        && succeeded
+                        && let Some(instance_id) = job.instance_id.clone()
+                    {
+                        self.add_server_and_join(instance_id, name, address, cx);
+                    }
                     if let Some((game_dir, mods_dir)) = self.pending_copies.remove(&job.id)
                         && succeeded
                         && let Some(instance_id) = job.instance_id.clone()
@@ -1199,6 +1209,170 @@ impl AppState {
             theseus::instance::QuickPlayType::Singleplayer(world_folder),
             cx,
         )
+    }
+
+    /// Join a server listed on Modrinth. Reuses the instance made for it
+    /// earlier, or makes one (plain Minecraft, or the server's modpack),
+    /// adds the server to its list and starts the game straight into it.
+    pub fn join_listed_server(
+        &mut self,
+        server: calcite_core::servers::Server,
+        cx: &mut Context<Self>,
+    ) {
+        use calcite_core::servers::Content;
+        use theseus::data::InstanceLink;
+        let Some(address) = server.address().map(str::to_string) else {
+            self.notify_error(
+                "Can't join that server",
+                format!("{} doesn't list an address.", server.name),
+            );
+            cx.notify();
+            return;
+        };
+        enum Join {
+            Ready(String),
+            Installing(Box<InstallJobSnapshot>),
+        }
+        let (project_id, name, icon) = (
+            server.project_id.clone(),
+            server.name.clone(),
+            server.icon_url.clone(),
+        );
+        let content = server.content().cloned();
+        let task = Backend::global(cx).call(async move {
+            let existing = theseus::instance::list()
+                .await?
+                .into_iter()
+                .find(|m| match &m.link {
+                    InstanceLink::ServerProject { project_id: p } => *p == project_id,
+                    InstanceLink::ServerProjectModpack {
+                        server_project_id, ..
+                    } => *server_project_id == project_id,
+                    _ => false,
+                })
+                .map(|m| m.instance.id);
+            if let Some(id) = existing {
+                return Ok(Join::Ready(id));
+            }
+            let job = match content {
+                Some(Content::Modpack {
+                    version_id,
+                    project_id: pack,
+                    ..
+                }) => {
+                    theseus::install::create_modpack_instance(
+                        theseus::pack::install_from::CreatePackLocation::FromVersionId {
+                            project_id: pack.clone(),
+                            version_id: version_id.clone(),
+                            title: name.clone(),
+                            icon_url: icon,
+                        },
+                        Some(theseus::install::InstallPostInstallEdit {
+                            name: Some(name.clone()),
+                            icon_path: None,
+                            link: Some(InstanceLink::ServerProjectModpack {
+                                server_project_id: project_id,
+                                content_project_id: pack,
+                                content_version_id: version_id,
+                            }),
+                        }),
+                    )
+                    .await?
+                }
+                other => {
+                    let wanted = match other {
+                        Some(Content::Vanilla {
+                            recommended_game_version,
+                            supported_game_versions,
+                        }) => recommended_game_version
+                            .or_else(|| supported_game_versions.first().cloned()),
+                        _ => None,
+                    };
+                    let version = match wanted {
+                        Some(v) => v,
+                        None => theseus::metadata::get_minecraft_versions()
+                            .await?
+                            .latest
+                            .release
+                            .as_str()
+                            .to_string(),
+                    };
+                    theseus::install::create_instance(
+                        name,
+                        version,
+                        ModLoader::Vanilla,
+                        None,
+                        None,
+                        None,
+                        InstanceLink::ServerProject { project_id },
+                    )
+                    .await?
+                }
+            };
+            Ok(Join::Installing(Box::new(job)))
+        });
+        let name = server.name.clone();
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| {
+                match result {
+                    Ok(Join::Ready(id)) => this.add_server_and_join(id, name, address, cx),
+                    Ok(Join::Installing(job)) => {
+                        this.pending_joins
+                            .insert(job.job_id.clone(), (name, address));
+                        this.track_job(*job, cx);
+                    }
+                    Err(error) => {
+                        this.notify_error("Couldn't get that server ready", format!("{error:#}"))
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Put the server in the instance's list (once) and start the game into it.
+    fn add_server_and_join(
+        &mut self,
+        instance_id: String,
+        name: String,
+        address: String,
+        cx: &mut Context<Self>,
+    ) {
+        let (id, target) = (instance_id.clone(), address.clone());
+        let task = Backend::global(cx).call(async move {
+            let listed = theseus::worlds::get_instance_worlds(&id)
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .any(|w| {
+                    matches!(&w.details, theseus::worlds::WorldDetails::Server { address, .. }
+                        if address.eq_ignore_ascii_case(&target))
+                });
+            if !listed {
+                theseus::worlds::add_server_to_instance(
+                    &id,
+                    name,
+                    target,
+                    theseus::worlds::ServerPackStatus::Prompt,
+                    None,
+                    None,
+                )
+                .await?;
+            }
+            Ok(())
+        });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| {
+                if let Err(error) = result {
+                    tracing::warn!("couldn't add the server to {instance_id}: {error:#}");
+                }
+                this.play_server(&instance_id, address, cx);
+            });
+        })
+        .detach();
     }
 
     /// Start the game and join a server right away.

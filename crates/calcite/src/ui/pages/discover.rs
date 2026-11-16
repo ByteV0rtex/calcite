@@ -55,6 +55,9 @@ pub struct DiscoverPage {
     /// Project ids already in the target instance.
     installed: std::collections::HashSet<String>,
     pending: Option<Task<()>>,
+    /// The Servers tab (made the first time it's opened).
+    servers: Option<Entity<crate::ui::pages::servers::ServersBrowser>>,
+    showing_servers: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -123,6 +126,8 @@ impl DiscoverPage {
             started: Default::default(),
             installed: Default::default(),
             pending: None,
+            servers: None,
+            showing_servers: false,
             _subscriptions: subscriptions,
         };
         page.search(Duration::ZERO, cx);
@@ -210,7 +215,11 @@ impl DiscoverPage {
     }
 
     fn set_type(&mut self, project_type: ProjectType, window: &mut Window, cx: &mut Context<Self>) {
+        let was_servers = std::mem::take(&mut self.showing_servers);
         if self.query.project_type == project_type {
+            if was_servers {
+                cx.notify();
+            }
             return;
         }
         self.set_type_inner(project_type, window, cx);
@@ -291,7 +300,7 @@ impl DiscoverPage {
             if self.target.is_some() && t == ProjectType::Modpack {
                 continue;
             }
-            let active = t == self.query.project_type;
+            let active = t == self.query.project_type && !self.showing_servers;
             row = row.child(
                 div()
                     .id(SharedString::from(format!("ptype-{}", t.as_str())))
@@ -314,7 +323,43 @@ impl DiscoverPage {
                     .child(t.plural_label()),
             );
         }
+        // Servers join rather than install, so they only make sense here.
+        if self.target.is_none() {
+            let active = self.showing_servers;
+            row =
+                row.child(
+                    div()
+                        .id("ptype-servers")
+                        .h(px(30.0))
+                        .px(space(3.0))
+                        .flex()
+                        .items_center()
+                        .gap(space(1.5))
+                        .rounded(px(radius::SM))
+                        .text_size(px(type_scale::BODY))
+                        .font_weight(FontWeight::MEDIUM)
+                        .cursor_pointer()
+                        .when(active, |d| d.bg(p.raised).text_color(p.text))
+                        .when(!active, |d| {
+                            d.text_color(p.text_secondary)
+                                .hover(|s| s.text_color(p.text).bg(p.hover))
+                        })
+                        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                            this.show_servers(window, cx)
+                        }))
+                        .child("Servers"),
+                );
+        }
         row
+    }
+
+    pub fn show_servers(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.servers.is_none() {
+            self.servers =
+                Some(cx.new(|cx| crate::ui::pages::servers::ServersBrowser::new(window, cx)));
+        }
+        self.showing_servers = true;
+        cx.notify();
     }
 
     fn filters(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -691,6 +736,26 @@ impl Render for DiscoverPage {
             .as_ref()
             .and_then(|t| AppState::global(cx).read(cx).instance(t).cloned());
 
+        if let (true, Some(servers)) = (self.showing_servers, self.servers.clone()) {
+            return div()
+                .size_full()
+                .flex()
+                .flex_col()
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(space(4.0))
+                        .px(space(8.0))
+                        .pt(space(7.0))
+                        .pb(space(4.0))
+                        .child(page_header("Discover", None, cx))
+                        .child(self.type_tabs(cx)),
+                )
+                .child(servers)
+                .into_any_element();
+        }
+
         div()
             .size_full()
             .flex()
@@ -773,5 +838,6 @@ impl Render for DiscoverPage {
                     .pb(space(10.0))
                     .child(list),
             )
+            .into_any_element()
     }
 }

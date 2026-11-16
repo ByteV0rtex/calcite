@@ -541,6 +541,15 @@ impl Shell {
         self.navigate(Route::Discover, window, cx);
     }
 
+    /// Discover's Servers tab.
+    pub fn open_servers(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.discover.update(cx, |d, cx| {
+            d.set_target(None, window, cx);
+            d.show_servers(window, cx);
+        });
+        self.navigate(Route::Discover, window, cx);
+    }
+
     pub fn all_friends_shown(&self) -> bool {
         self.all_friends
     }

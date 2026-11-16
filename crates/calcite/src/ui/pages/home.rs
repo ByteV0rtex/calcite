@@ -289,16 +289,32 @@ pub fn render(shell: &mut Shell, window: &mut Window, cx: &mut Context<Shell>) -
                         .child(section_heading("Jump back in", cx))
                         .child(jump),
                 )
-                .when(!recent.is_empty(), |d| {
-                    d.child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap(space(3.0))
-                            .child(section_heading("Worlds and servers", cx))
-                            .child(worlds_row),
-                    )
-                })
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(space(3.0))
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .child(section_heading("Worlds and servers", cx))
+                                .child(
+                                    Button::new("home-find-server")
+                                        .icon("server")
+                                        .label("Find a server")
+                                        .small()
+                                        .ghost()
+                                        .on_click(cx.listener(
+                                            |this, _: &ClickEvent, window, cx| {
+                                                this.open_servers(window, cx)
+                                            },
+                                        )),
+                                ),
+                        )
+                        .when(!recent.is_empty(), |d| d.child(worlds_row)),
+                )
                 .child(
                     div()
                         .flex()

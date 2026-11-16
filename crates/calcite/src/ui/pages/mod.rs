@@ -11,6 +11,7 @@ pub mod library;
 pub mod move_in;
 pub mod project;
 pub mod screenshots;
+pub mod servers;
 pub mod settings;
 pub mod skins;
 pub mod storage;

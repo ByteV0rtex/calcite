@@ -286,6 +286,9 @@ fn take_snapshot(window: gpui_kit::AnyWindowHandle, page: String, out: String, c
                         if let Some(text) = word.strip_prefix("search=") {
                             shell.type_search(text, window, cx);
                         }
+                        if word == "servers" {
+                            shell.open_servers(window, cx);
+                        }
                         if word == "open-downloads" {
                             shell.open_downloads(cx);
                         }

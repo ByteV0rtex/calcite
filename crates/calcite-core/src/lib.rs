@@ -13,6 +13,7 @@ pub mod modrinth_auth;
 pub mod monitor;
 pub mod motd;
 pub mod paste;
+pub mod servers;
 pub mod skin3d;
 pub mod snapshots;
 pub mod storage;
