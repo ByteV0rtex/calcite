@@ -5,6 +5,7 @@ pub mod backups;
 pub mod bisect;
 pub mod clone;
 pub mod crash;
+pub mod dropped;
 pub mod fuzzy;
 pub mod health;
 pub mod launchers;

@@ -1499,6 +1499,93 @@ impl AppState {
         .detach();
     }
 
+    /// Install a modpack file (.mrpack) as a new instance.
+    pub fn install_modpack_file(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        let install = Backend::global(cx).call(async move {
+            theseus::install::create_modpack_instance(
+                theseus::pack::install_from::CreatePackLocation::FromFile { path },
+                None,
+            )
+            .await
+        });
+        self.track_task(install, "Couldn't install that modpack", cx);
+    }
+
+    /// Put dropped mods, packs and worlds into an instance.
+    pub fn add_dropped(
+        &mut self,
+        instance_id: String,
+        items: Vec<(PathBuf, calcite_core::dropped::Dropped)>,
+        cx: &mut Context<Self>,
+    ) {
+        use calcite_core::dropped::Dropped;
+        use theseus::data::ProjectType;
+        let name = self
+            .instance(&instance_id)
+            .map(|i| i.name.to_string())
+            .unwrap_or_else(|| "the instance".into());
+        let count = items.len();
+        let id = instance_id.clone();
+        let task = Backend::global(cx).run(async move {
+            let mut failed = Vec::new();
+            for (path, kind) in items {
+                let file = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                let result: anyhow::Result<()> = match kind {
+                    Dropped::World => match theseus::instance::get_full_path(&id).await {
+                        Ok(dir) => tokio::task::spawn_blocking(move || {
+                            calcite_core::dropped::import_world(&path, &dir.join("saves"))
+                                .map(|_| ())
+                        })
+                        .await
+                        .map_err(anyhow::Error::from)
+                        .and_then(|r| r),
+                        Err(e) => Err(anyhow::anyhow!("{e}")),
+                    },
+                    other => {
+                        let project_type = match other {
+                            Dropped::ResourcePack => ProjectType::ResourcePack,
+                            Dropped::ShaderPack => ProjectType::ShaderPack,
+                            Dropped::DataPack => ProjectType::DataPack,
+                            _ => ProjectType::Mod,
+                        };
+                        theseus::instance::add_project_from_path(&id, &path, Some(project_type))
+                            .await
+                            .map(|_| ())
+                            .map_err(|e| anyhow::anyhow!("{e}"))
+                    }
+                };
+                if let Err(error) = result {
+                    failed.push(format!("{file}: {error:#}"));
+                }
+            }
+            failed
+        });
+        cx.spawn(async move |this, cx| {
+            let failed = task.await.unwrap_or_default();
+            let _ = this.update(cx, |this, cx| {
+                if failed.is_empty() {
+                    this.notice = Some(Notice {
+                        title: format!(
+                            "Added {count} file{} to {name}",
+                            if count == 1 { "" } else { "s" }
+                        )
+                        .into(),
+                        body: "Worlds are in its Worlds tab, everything else in Content.".into(),
+                        is_error: false,
+                    });
+                } else {
+                    this.notify_error("Some files couldn't be added", failed.join("\n"));
+                }
+                *this.content_revision.entry(instance_id).or_default() += 1;
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     /// Import one instance from Prism, MultiMC, ATLauncher, GDLauncher or
     /// the CurseForge app, using the backend's importers.
     pub fn import_from_launcher(

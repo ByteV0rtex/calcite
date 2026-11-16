@@ -1,5 +1,6 @@
 pub mod components;
 pub mod create_instance;
+pub mod drop_dialog;
 pub mod friends;
 pub mod instance_picker;
 pub mod instance_settings;

@@ -571,6 +571,78 @@ impl Shell {
         cx.notify();
     }
 
+    /// Sort out dropped files: modpacks become instances, everything else
+    /// goes into the open instance or one the player picks.
+    pub fn handle_drop(
+        &mut self,
+        paths: Vec<std::path::PathBuf>,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use calcite_core::dropped::{Dropped, classify};
+        let sorted = cx.background_spawn(async move {
+            paths
+                .into_iter()
+                .map(|p| {
+                    let kind = classify(&p);
+                    (p, kind)
+                })
+                .collect::<Vec<_>>()
+        });
+        let target = match &self.route {
+            Route::Instance(id) => Some(id.clone()),
+            _ => None,
+        };
+        cx.spawn(async move |this, cx| {
+            let sorted = sorted.await;
+            let _ = this.update(cx, |this, cx| {
+                let name = |p: &std::path::PathBuf| {
+                    p.file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_default()
+                };
+                let mut into_instance = Vec::new();
+                let mut skipped = Vec::new();
+                for (path, kind) in sorted {
+                    match kind {
+                        Dropped::Modpack => this
+                            .state
+                            .update(cx, |s, cx| s.install_modpack_file(path, cx)),
+                        Dropped::CurseForgePack => skipped.push(format!(
+                            "{} is a CurseForge modpack: import it from Settings → Move in.",
+                            name(&path)
+                        )),
+                        Dropped::Unknown => skipped.push(format!(
+                            "{} isn't a modpack, mod, pack or world.",
+                            name(&path)
+                        )),
+                        kind => into_instance.push((path, kind)),
+                    }
+                }
+                if !skipped.is_empty() {
+                    this.state.update(cx, |s, cx| {
+                        s.notify_error("Some files were left out", skipped.join("\n"));
+                        cx.notify();
+                    });
+                }
+                if into_instance.is_empty() {
+                    return;
+                }
+                match target {
+                    Some(id) => this
+                        .state
+                        .update(cx, |s, cx| s.add_dropped(id, into_instance, cx)),
+                    None => {
+                        let dialog =
+                            cx.new(|_| crate::ui::drop_dialog::DropDialog::new(into_instance));
+                        this.show_dialog(dialog, cx);
+                    }
+                }
+            });
+        })
+        .detach();
+    }
+
     /// Open the ⌘K palette, or close it if it's open.
     pub fn toggle_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.palette.take().is_some() {
@@ -1667,12 +1739,23 @@ impl Render for Shell {
         let page = self.page(window, cx);
         let notice = self.notice(cx);
         let dialog = self.dialog.clone();
+        let drop_ring = p.accent;
         div()
+            .id("shell-root")
             .size_full()
             .relative()
             .flex()
             .flex_col()
             .bg(p.app)
+            // Files dropped anywhere on the window.
+            .drag_over::<gpui_kit::ExternalPaths>(move |style, _, _, _| {
+                style.border_2().border_color(drop_ring)
+            })
+            .on_drop(
+                cx.listener(|this, paths: &gpui_kit::ExternalPaths, window, cx| {
+                    this.handle_drop(paths.paths().to_vec(), window, cx)
+                }),
+            )
             .text_color(p.text)
             .font_family(theme::fonts::UI)
             .text_size(px(type_scale::BODY))

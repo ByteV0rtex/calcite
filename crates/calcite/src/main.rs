@@ -304,6 +304,9 @@ fn take_snapshot(window: gpui_kit::AnyWindowHandle, page: String, out: String, c
                         if let Some(text) = word.strip_prefix("search=") {
                             shell.type_search(text, window, cx);
                         }
+                        if let Some(path) = word.strip_prefix("drop=") {
+                            shell.handle_drop(vec![path.into()], window, cx);
+                        }
                         if word == "palette" {
                             shell.toggle_palette(window, cx);
                         }
