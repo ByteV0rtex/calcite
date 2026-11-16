@@ -3,8 +3,14 @@ name: CI
 on:
   push:
     branches: [main]
+    tags: ["v*"]
   pull_request:
   workflow_dispatch:
+    inputs:
+      release:
+        description: Also make optimized release builds (slow)
+        type: boolean
+        default: false
 
 # A newer push makes older runs on the same branch pointless.
 concurrency:
@@ -54,24 +60,46 @@ jobs:
         shell: bash
         run: scripts/sync-backend.sh
 
-      - uses: Swatinem/rust-cache@v2
+      # Windows builds Rust far faster on a Dev Drive (ReFS, no antivirus
+      # scanning). If the action ever fails, the normal disk still works.
+      - name: Fast build disk (Windows)
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        uses: samypr100/setup-dev-drive@v3
+        with:
+          drive-size: 24GB
+          drive-format: ReFS
+          env-mapping: |
+            CARGO_TARGET_DIR,{{ DEV_DRIVE }}/target
 
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> ${{ env.CARGO_TARGET_DIR || 'target' }}"
+
+      # Formatting and lints don't depend on the OS: check them once or twice,
+      # not on the slow Windows runners.
       - name: Format
+        if: runner.os == 'Linux'
         run: cargo fmt --check -p calcite -p calcite-core -p calcite-login
 
       - name: Lint
+        if: runner.os != 'Windows'
         run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: Test
         run: cargo test --workspace
 
+      # Optimized builds only when asked for (Run workflow → release) or for
+      # a version tag; nobody needs one on every push.
       - name: Release build
+        if: (github.event_name == 'workflow_dispatch' && inputs.release) || startsWith(github.ref, 'refs/tags/')
         run: cargo build --release -p calcite
 
       - uses: actions/upload-artifact@v4
+        if: (github.event_name == 'workflow_dispatch' && inputs.release) || startsWith(github.ref, 'refs/tags/')
         with:
           name: calcite-${{ runner.os }}
           path: |
-            target/release/calcite
-            target/release/calcite.exe
+            ${{ env.CARGO_TARGET_DIR || 'target' }}/release/calcite
+            ${{ env.CARGO_TARGET_DIR || 'target' }}/release/calcite.exe
           if-no-files-found: error
