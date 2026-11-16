@@ -40,6 +40,7 @@ pub enum Route {
     Project(String, Option<String>),
     Settings(SettingsSection),
     Skins,
+    Screenshots,
     /// A Modrinth user's page.
     User(String),
     Gallery,
@@ -145,6 +146,8 @@ pub struct Shell {
     move_in: Option<Entity<MoveInPage>>,
     game_settings: Option<Entity<crate::ui::pages::game_settings::GameSettings>>,
     storage: Option<Entity<crate::ui::pages::storage::StoragePage>>,
+    /// Re-read each time it's opened.
+    screenshots: Option<Entity<crate::ui::pages::screenshots::ScreenshotsPage>>,
     /// Only alive while Skins is open (it holds rendered thumbnails).
     skins: Option<Entity<crate::ui::pages::skins::SkinsPage>>,
     dialog: Option<gpui_kit::AnyView>,
@@ -219,6 +222,7 @@ impl Shell {
             game_settings: None,
             storage: None,
             skins: None,
+            screenshots: None,
             dialog: None,
             library_filter,
             global_search,
@@ -343,6 +347,9 @@ impl Shell {
                 .detach();
                 self.user_page = Some(page);
             }
+        }
+        if route == Route::Screenshots && self.route != route {
+            self.screenshots = Some(cx.new(crate::ui::pages::screenshots::ScreenshotsPage::new));
         }
         if route == Route::Skins {
             if self.skins.is_none() {
@@ -913,6 +920,14 @@ impl Shell {
                         Route::Skins,
                         route == Route::Skins,
                         cx,
+                    ))
+                    .child(nav_item(
+                        "nav-screenshots",
+                        "image",
+                        "Screenshots",
+                        Route::Screenshots,
+                        route == Route::Screenshots,
+                        cx,
                     )),
             )
             .when(!instances.is_empty(), |d| {
@@ -1419,6 +1434,10 @@ impl Shell {
                 settings::render(self, section, move_in, game, storage, window, cx)
             }
             Route::User(_) => match &self.user_page {
+                Some(page) => page.clone().into_any_element(),
+                None => div().into_any_element(),
+            },
+            Route::Screenshots => match &self.screenshots {
                 Some(page) => page.clone().into_any_element(),
                 None => div().into_any_element(),
             },

@@ -9,6 +9,7 @@ pub mod instance_tabs;
 pub mod library;
 pub mod move_in;
 pub mod project;
+pub mod screenshots;
 pub mod settings;
 pub mod skins;
 pub mod storage;

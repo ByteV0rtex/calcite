@@ -39,3 +39,6 @@ chrono.workspace = true
 calcite-core = { path = "../calcite-core" }
 minecraft-meta-manifest = { path = "../../vendor/modrinth/packages/minecraft-meta-manifest" }
 theseus = { path = "../../vendor/modrinth/packages/app-lib", features = ["native-events"] }
+
+[dev-dependencies]
+tempfile = "3.27.0"

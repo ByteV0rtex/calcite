@@ -9,7 +9,7 @@ use crate::ui::components::{
 };
 use crate::ui::shell::{Route, Shell, instance_icon};
 
-pub fn render(shell: &mut Shell, _window: &mut Window, cx: &mut Context<Shell>) -> AnyElement {
+pub fn render(shell: &mut Shell, window: &mut Window, cx: &mut Context<Shell>) -> AnyElement {
     let p = cx.palette().clone();
     let state = shell.state().read(cx);
     let instances = state.instances.clone();
@@ -141,6 +141,103 @@ pub fn render(shell: &mut Shell, _window: &mut Window, cx: &mut Context<Shell>) 
         );
     }
 
+    // Worlds and servers you played lately: one click puts you back in.
+    let recent = shell.state().read(cx).recent_worlds.clone();
+    // Three per row, filling the page like the instance cards above.
+    let page_w = (f32::from(window.viewport_size().width) - crate::ui::shell::SIDEBAR_WIDTH - 64.0)
+        .min(1120.0 - 64.0);
+    let world_w = ((page_w - 2.0 * 12.0) / 3.0).floor().max(220.0);
+    let mut worlds_row = div().flex().flex_wrap().gap(space(3.0));
+    for (ix, w) in recent.iter().take(6).enumerate() {
+        let inst_name = instances
+            .iter()
+            .find(|i| i.id == w.instance_id)
+            .map(|i| i.name.clone())
+            .unwrap_or_default();
+        let icon_src = w.icon.as_deref().and_then(|i| {
+            if i.starts_with("http") || i.starts_with("data:") {
+                crate::images::Images::get(i, 96, cx)
+            } else {
+                crate::images::Images::get_file(std::path::Path::new(i), 96, cx)
+            }
+        });
+        let (id, key, server) = (w.instance_id.clone(), w.key.clone(), w.server);
+        worlds_row = worlds_row.child(
+            div()
+                .id(SharedString::from(format!("recent-world-{ix}")))
+                .w(px(world_w))
+                .flex()
+                .items_center()
+                .gap(space(3.0))
+                .p(space(3.0))
+                .rounded(px(radius::LG))
+                .bg(p.surface)
+                .border_1()
+                .border_color(p.border)
+                .child(match icon_src {
+                    Some(src) => gpui_kit::img(src)
+                        .size(px(40.0))
+                        .rounded(px(radius::SM))
+                        .into_any_element(),
+                    None => div()
+                        .size(px(40.0))
+                        .flex_none()
+                        .rounded(px(radius::SM))
+                        .bg(p.raised)
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(crate::ui::components::icon(
+                            if server { "server" } else { "globe" },
+                            18.0,
+                            p.text_muted,
+                        ))
+                        .into_any_element(),
+                })
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .flex_1()
+                        .min_w_0()
+                        .child(
+                            div()
+                                .truncate()
+                                .text_size(px(type_scale::BODY))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(p.text)
+                                .child(w.name.clone()),
+                        )
+                        .child(
+                            div()
+                                .truncate()
+                                .text_size(px(type_scale::SMALL))
+                                .text_color(p.text_muted)
+                                .child(format!(
+                                    "{} · {}",
+                                    inst_name,
+                                    w.last_played.map(relative_time).unwrap_or_default()
+                                )),
+                        ),
+                )
+                .child(
+                    Button::new(SharedString::from(format!("recent-world-play-{ix}")))
+                        .icon("play")
+                        .ghost()
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                            let (id, key) = (id.clone(), key.clone());
+                            this.state().update(cx, |s, cx| {
+                                if server {
+                                    s.play_server(&id, key, cx)
+                                } else {
+                                    s.play_world(&id, key, cx)
+                                }
+                            });
+                        })),
+                ),
+        );
+    }
+
     let total: u64 = instances.iter().map(|i| i.played_secs).sum();
     let modded = instances
         .iter()
@@ -192,6 +289,16 @@ pub fn render(shell: &mut Shell, _window: &mut Window, cx: &mut Context<Shell>) 
                         .child(section_heading("Jump back in", cx))
                         .child(jump),
                 )
+                .when(!recent.is_empty(), |d| {
+                    d.child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(space(3.0))
+                            .child(section_heading("Worlds and servers", cx))
+                            .child(worlds_row),
+                    )
+                })
                 .child(
                     div()
                         .flex()

@@ -260,6 +260,7 @@ pub struct AppState {
     pub modrinth_signing_in: Option<tokio::sync::oneshot::Sender<()>>,
     pub friends: Vec<Friend>,
     friends_task: Option<Task<()>>,
+    pub recent_worlds: Vec<RecentWorld>,
     refresh_task: Option<Task<()>>,
 }
 
@@ -276,6 +277,18 @@ pub struct ModrinthUser {
     pub id: String,
     pub username: SharedString,
     pub avatar_url: Option<String>,
+}
+
+/// A world or server you played recently, for "Jump back in".
+#[derive(Clone, Debug, PartialEq)]
+pub struct RecentWorld {
+    pub instance_id: String,
+    pub name: SharedString,
+    /// Folder name (singleplayer) or address (server).
+    pub key: String,
+    pub server: bool,
+    pub last_played: Option<DateTime<Utc>>,
+    pub icon: Option<String>,
 }
 
 /// Someone on your Modrinth friends list, or a request either way.
@@ -322,6 +335,7 @@ impl AppState {
             modrinth_signing_in: None,
             friends: Vec::new(),
             friends_task: None,
+            recent_worlds: Vec::new(),
             refresh_task: None,
         });
         cx.set_global(AppStateHandle(state.clone()));
@@ -615,6 +629,43 @@ impl AppState {
         .detach();
     }
 
+    fn refresh_recent_worlds(&mut self, cx: &mut Context<Self>) {
+        use theseus::worlds::DisplayStatus;
+        let fetch = Backend::global(cx).call(async {
+            theseus::worlds::get_recent_worlds(8, DisplayStatus::Normal | DisplayStatus::Favorite)
+                .await
+        });
+        cx.spawn(async move |this, cx| {
+            let Ok(worlds) = fetch.await else { return };
+            let _ = this.update(cx, |this, cx| {
+                this.recent_worlds = worlds
+                    .into_iter()
+                    .filter_map(|w| {
+                        let value = serde_json::to_value(&w.world).ok()?;
+                        let server = value.get("type").and_then(|t| t.as_str()) == Some("server");
+                        let key = value
+                            .get(if server { "address" } else { "path" })
+                            .and_then(|v| v.as_str())?
+                            .to_string();
+                        Some(RecentWorld {
+                            instance_id: w.instance_id,
+                            name: w.world.name.clone().into(),
+                            key,
+                            server,
+                            last_played: w.world.last_played,
+                            icon: value
+                                .get("icon")
+                                .and_then(|i| i.as_str())
+                                .map(str::to_string),
+                        })
+                    })
+                    .collect();
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     /// Re-read the friends list (coalesced; friend events come in bursts).
     pub fn refresh_friends(&mut self, cx: &mut Context<Self>) {
         let Some(me) = self.modrinth.as_ref().map(|u| u.id.clone()) else {
@@ -768,6 +819,75 @@ impl AppState {
             friend("Ines", true, false, false, None),
         ];
         cx.notify();
+    }
+
+    /// Copy an instance (a new one appears as a download).
+    pub fn duplicate(&mut self, id: String, cx: &mut Context<Self>) {
+        let task =
+            Backend::global(cx).call(async move { theseus::install::duplicate_instance(id).await });
+        self.track_task(task, "Couldn't duplicate it", cx);
+    }
+
+    /// Check and re-download the game, loader, libraries and Java.
+    pub fn repair(&mut self, id: String, cx: &mut Context<Self>) {
+        let task = Backend::global(cx)
+            .call(async move { theseus::install::install_existing_instance(id, true).await });
+        self.track_task(task, "Couldn't repair it", cx);
+    }
+
+    fn track_task(
+        &mut self,
+        task: impl Future<Output = anyhow::Result<InstallJobSnapshot>> + 'static,
+        failure: &'static str,
+        cx: &mut Context<Self>,
+    ) {
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| {
+                match result {
+                    Ok(job) => this.track_job(job, cx),
+                    Err(error) => this.notify_error(failure, format!("{error:#}")),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Put a shortcut that starts this instance on the desktop.
+    pub fn make_shortcut(&mut self, id: String, cx: &mut Context<Self>) {
+        let Some(inst) = self.instance(&id).cloned() else {
+            return;
+        };
+        let icon = inst.icon_path.clone();
+        let made = cx.background_spawn(async move {
+            crate::shortcuts::create(&inst.name, &inst.id, icon.as_deref())
+        });
+        cx.spawn(async move |this, cx| {
+            let result = made.await;
+            let _ = this.update(cx, |this, cx| {
+                match result {
+                    Ok(path) => {
+                        this.notice = Some(Notice {
+                            title: "Shortcut on your desktop".into(),
+                            body: format!(
+                                "Open {} to start this instance without opening Calcite first.",
+                                path.file_name()
+                                    .map(|f| f.to_string_lossy().into_owned())
+                                    .unwrap_or_default()
+                            )
+                            .into(),
+                            is_error: false,
+                        })
+                    }
+                    Err(error) => {
+                        this.notify_error("Couldn't make the shortcut", format!("{error:#}"))
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// Pause, resume, retry, cancel or dismiss a download.
@@ -971,6 +1091,7 @@ impl AppState {
                     for p in processes {
                         this.mark_running(p.instance_id, p.start_time, cx);
                     }
+                    this.refresh_recent_worlds(cx);
                     cx.notify();
                 });
             }

@@ -8,6 +8,7 @@ mod images;
 mod login;
 mod modrinth_login;
 mod prefs;
+mod shortcuts;
 mod state;
 mod theme;
 mod ui;
@@ -133,6 +134,7 @@ fn main() {
                         "storage" => Route::Settings(ui::pages::settings::Section::Storage),
                         "about" => Route::Settings(ui::pages::settings::Section::About),
                         "skins" => Route::Skins,
+                        "screenshots" => Route::Screenshots,
                         "user" => Route::User(
                             std::env::var("CALCITE_SNAPSHOT_USER")
                                 .unwrap_or_else(|_| "jellysquid3".into()),
@@ -311,6 +313,7 @@ fn take_snapshot(window: gpui_kit::AnyWindowHandle, page: String, out: String, c
                             "broken" => p.answer_bisect(true, cx),
                             "stop" => p.finish_bisect(Vec::new(), cx),
                             "share" => cx.emit(ui::pages::instance::InstancePageEvent::Share(p.id().to_string())),
+                            "more" => p.open_more(cx),
                             w if w.starts_with("open-file=") => {
                                 p.open_file(w.trim_start_matches("open-file=").to_string(), cx)
                             }

@@ -138,8 +138,12 @@ pub struct InstancePage {
     /// (shared instances you joined).
     shared_update: Option<usize>,
     files: Option<Entity<crate::ui::pages::files_tab::FilesBrowser>>,
+    more_open: bool,
     _subscriptions: Vec<Subscription>,
 }
+
+/// What a ⋯ menu item does.
+type MoreAction = Box<dyn Fn(&mut InstancePage, &mut Context<InstancePage>)>;
 
 impl InstancePage {
     pub fn new(id: String, _window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -183,6 +187,7 @@ impl InstancePage {
             pack_loading: false,
             shared_update: None,
             files: None,
+            more_open: false,
             _subscriptions: subscriptions,
         };
         page.load_content(cx);
@@ -192,6 +197,155 @@ impl InstancePage {
         page.resume_bisect();
         page.check_shared_update(cx);
         page
+    }
+
+    /// The ⋯ button and its menu: less frequent things to do with this
+    /// instance.
+    fn more_menu(&self, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
+        let p = cx.palette().clone();
+        let id = self.id.clone();
+        let name = self
+            .state
+            .read(cx)
+            .instance(&id)
+            .map(|i| i.name.to_string())
+            .unwrap_or_default();
+        let hidden = cx
+            .global::<crate::prefs::Prefs>()
+            .hidden_instances
+            .contains(&id);
+        let item = |key: &'static str,
+                    glyph: &'static str,
+                    label: &'static str,
+                    cx: &mut Context<Self>,
+                    act: MoreAction| {
+            div()
+                .id(key)
+                .flex()
+                .items_center()
+                .gap(space(2.0))
+                .h(px(30.0))
+                .px(space(2.5))
+                .rounded(px(radius::SM))
+                .text_size(px(type_scale::BODY))
+                .text_color(p.text_secondary)
+                .cursor_pointer()
+                .hover(|s| s.bg(p.hover).text_color(p.text))
+                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                    this.more_open = false;
+                    act(this, cx);
+                    cx.notify();
+                }))
+                .child(icon(glyph, 14.0, p.text_muted))
+                .child(label)
+        };
+        let menu = self.more_open.then(|| {
+            let (a, b, c, d, e, f) = (
+                id.clone(),
+                id.clone(),
+                id.clone(),
+                id.clone(),
+                id.clone(),
+                id.clone(),
+            );
+            let export_name = name.clone();
+            let panel = div()
+                .id("instance-more-menu")
+                .absolute()
+                .top(px(36.0))
+                .right(px(0.0))
+                .min_w(px(220.0))
+                .p(space(1.0))
+                .rounded(px(radius::MD))
+                .bg(p.overlay)
+                .border_1()
+                .border_color(p.border_strong)
+                .shadow_lg()
+                .flex()
+                .flex_col()
+                .on_mouse_down_out(cx.listener(|this, _: &gpui_kit::MouseDownEvent, _, cx| {
+                    this.more_open = false;
+                    cx.notify();
+                }))
+                .child(item(
+                    "more-export",
+                    "share-2",
+                    "Export as .mrpack…",
+                    cx,
+                    Box::new(move |_, cx| {
+                        crate::ui::instance_settings::export_instance(
+                            a.clone(),
+                            export_name.clone(),
+                            cx,
+                        )
+                    }),
+                ))
+                .child(item(
+                    "more-duplicate",
+                    "copy",
+                    "Duplicate",
+                    cx,
+                    Box::new(move |this, cx| {
+                        let id = b.clone();
+                        this.state.update(cx, |s, cx| s.duplicate(id, cx));
+                    }),
+                ))
+                .child(item(
+                    "more-shortcut",
+                    "monitor",
+                    "Create desktop shortcut",
+                    cx,
+                    Box::new(move |this, cx| {
+                        let id = c.clone();
+                        this.state.update(cx, |s, cx| s.make_shortcut(id, cx));
+                    }),
+                ))
+                .child(item(
+                    "more-repair",
+                    "wrench",
+                    "Repair",
+                    cx,
+                    Box::new(move |this, cx| {
+                        let id = d.clone();
+                        this.state.update(cx, |s, cx| s.repair(id, cx));
+                    }),
+                ))
+                .child(item(
+                    "more-hide",
+                    if hidden { "eye" } else { "eye-off" },
+                    if hidden {
+                        "Show in Library"
+                    } else {
+                        "Hide from Library"
+                    },
+                    cx,
+                    Box::new(move |_, cx| {
+                        crate::prefs::Prefs::set_hidden(std::slice::from_ref(&e), !hidden, cx);
+                    }),
+                ))
+                .child(div().h(px(1.0)).my(space(1.0)).bg(p.border))
+                .child(item(
+                    "more-delete",
+                    "trash",
+                    "Delete…",
+                    cx,
+                    Box::new(move |_, cx| cx.emit(InstancePageEvent::OpenSettings(f.clone()))),
+                ));
+            gpui_kit::deferred(panel).with_priority(1)
+        });
+        div()
+            .relative()
+            .child(
+                Button::new("instance-more")
+                    .icon("ellipsis")
+                    .ghost()
+                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                        this.more_open = !this.more_open;
+                        cx.notify();
+                    })),
+            )
+            .children(menu)
+            .into_any_element()
     }
 
     /// For a shared instance you joined: has the owner published changes?
@@ -337,6 +491,13 @@ impl InstancePage {
 
     pub fn id(&self) -> &str {
         &self.id
+    }
+
+    /// Dev hook: open the ⋯ menu.
+    #[cfg_attr(not(feature = "snapshot"), allow(dead_code))]
+    pub(crate) fn open_more(&mut self, cx: &mut Context<Self>) {
+        self.more_open = true;
+        cx.notify();
     }
 
     /// Dev hook: open a file in the Files tab.
@@ -707,6 +868,7 @@ impl InstancePage {
                                         })),
                                 )
                             })
+                            .child(self.more_menu(cx))
                             .child(
                                 Button::new("instance-folder")
                                     .icon("folder-open")

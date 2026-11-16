@@ -251,72 +251,7 @@ impl InstanceSettings {
 
     fn export(&mut self, cx: &mut Context<Self>) {
         let name = Self::value(&self.name, cx);
-        let file = format!(
-            "{}.mrpack",
-            if name.is_empty() { "instance" } else { &name }
-        );
-        let dir = dirs::download_dir()
-            .or_else(dirs::home_dir)
-            .unwrap_or_default();
-        let target = cx.prompt_for_new_path(&dir, Some(&file));
-        let id = self.id.clone();
-        let backend = Backend::global(cx).clone();
-        let state = AppState::global(cx);
-        cx.spawn(async move |_, cx| {
-            let Ok(Ok(Some(path))) = target.await else {
-                return;
-            };
-            let export_path = path.clone();
-            let result = backend
-                .call(async move {
-                    // Everything except worlds, logs and screenshots.
-                    let skip = ["saves", "logs", "crash-reports", "screenshots", "backups"];
-                    let candidates = theseus::instance::get_pack_export_candidates(&id).await?;
-                    let mut include = Vec::new();
-                    let mut exclude = Vec::new();
-                    for candidate in candidates {
-                        let path = serde_json::to_value(&candidate)
-                            .ok()
-                            .and_then(|v| {
-                                v.get("path").and_then(|p| p.as_str()).map(str::to_string)
-                            })
-                            .unwrap_or_default();
-                        if skip
-                            .iter()
-                            .any(|s| path == *s || path.starts_with(&format!("{s}/")))
-                        {
-                            exclude.push(path);
-                        } else {
-                            include.push(path);
-                        }
-                    }
-                    theseus::instance::export_mrpack(
-                        &id,
-                        export_path,
-                        include,
-                        exclude,
-                        None,
-                        None,
-                        None,
-                    )
-                    .await
-                })
-                .await;
-            state.update(cx, |state, cx| {
-                match result {
-                    Ok(()) => {
-                        state.notice = Some(crate::state::Notice {
-                            title: "Exported".into(),
-                            body: format!("Saved to {}", path.display()).into(),
-                            is_error: false,
-                        })
-                    }
-                    Err(error) => state.notify_error("Export didn't finish", format!("{error:#}")),
-                }
-                cx.notify();
-            });
-        })
-        .detach();
+        export_instance(self.id.clone(), name, cx);
     }
 
     /// Re-download and re-check every game file (mods untouched).
@@ -434,6 +369,74 @@ impl InstanceSettings {
 }
 
 use gpui_kit::App;
+
+/// Save an instance as a .mrpack (asks where). Worlds, logs and
+/// screenshots stay out.
+pub fn export_instance(id: String, name: String, cx: &mut App) {
+    let file = format!(
+        "{}.mrpack",
+        if name.is_empty() { "instance" } else { &name }
+    );
+    let dir = dirs::download_dir()
+        .or_else(dirs::home_dir)
+        .unwrap_or_default();
+    let target = cx.prompt_for_new_path(&dir, Some(&file));
+    let backend = Backend::global(cx).clone();
+    let state = AppState::global(cx);
+    cx.spawn(async move |cx| {
+        let Ok(Ok(Some(path))) = target.await else {
+            return;
+        };
+        let export_path = path.clone();
+        let result = backend
+            .call(async move {
+                // Everything except worlds, logs and screenshots.
+                let skip = ["saves", "logs", "crash-reports", "screenshots", "backups"];
+                let candidates = theseus::instance::get_pack_export_candidates(&id).await?;
+                let mut include = Vec::new();
+                let mut exclude = Vec::new();
+                for candidate in candidates {
+                    let path = serde_json::to_value(&candidate)
+                        .ok()
+                        .and_then(|v| v.get("path").and_then(|p| p.as_str()).map(str::to_string))
+                        .unwrap_or_default();
+                    if skip
+                        .iter()
+                        .any(|s| path == *s || path.starts_with(&format!("{s}/")))
+                    {
+                        exclude.push(path);
+                    } else {
+                        include.push(path);
+                    }
+                }
+                theseus::instance::export_mrpack(
+                    &id,
+                    export_path,
+                    include,
+                    exclude,
+                    None,
+                    None,
+                    None,
+                )
+                .await
+            })
+            .await;
+        state.update(cx, |state, cx| {
+            match result {
+                Ok(()) => {
+                    state.notice = Some(crate::state::Notice {
+                        title: "Exported".into(),
+                        body: format!("Saved to {}", path.display()).into(),
+                        is_error: false,
+                    })
+                }
+                Err(error) => state.notify_error("Export didn't finish", format!("{error:#}")),
+            }
+            cx.notify();
+        });
+    })
+    .detach();
+}
 
 impl Render for InstanceSettings {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
