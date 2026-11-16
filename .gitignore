@@ -4,3 +4,6 @@
 .DS_Store
 *.swp
 /.calcite-dev/
+
+# Screenshots made while developing (they show personal data); kept locally only.
+docs/screenshots/
