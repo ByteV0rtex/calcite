@@ -1,5 +1,5 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
-  <path d="M4.5 7.2 13 3l7 3.6-8.4 4.3z"/>
-  <path d="M4.5 7.2 11.6 10.9 11 21.2 4 17.2z"/>
-  <path d="M11.6 10.9 20 6.6l-.4 10.2-8.6 4.4"/>
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round">
+  <!-- Line version of the gem-cut C, for one-color use inside the app. -->
+  <path d="M21.7 16 16 21.7H8L2.3 16V8L8 2.3h8L21.7 8 17.2 9.8 14.2 6.8H9.8L6.8 9.8v4.4l3 3h4.4l3-3z"/>
+  <path d="M2.3 8l7.5-1.2M8 2.3l6.2 4.5M16 2.3l1.2 7.5M2.3 16l4.5-6.2M8 21.7 6.8 14.2M16 21.7 9.8 17.2M21.7 16l-7.5 1.2"/>
 </svg>

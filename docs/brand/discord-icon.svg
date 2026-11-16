@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <!-- Full-bleed version for Discord, which rounds the corners itself. -->
+  <rect width="1024" height="1024" fill="#141518"/>
+  <g transform="translate(144 144) scale(11.5)" stroke="#141518" stroke-width="0.8" stroke-linejoin="round">
+    <path d="M6.13 21.28L21.28 6.13L26.25 18.14Z" fill="#FFE7B3"/>
+    <path d="M6.13 21.28L26.25 18.14L18.14 26.25Z" fill="#F4CD86"/>
+    <path d="M21.28 6.13L42.72 6.13L37.75 18.14Z" fill="#F4CD86"/>
+    <path d="M21.28 6.13L37.75 18.14L26.25 18.14Z" fill="#EDB65A"/>
+    <path d="M6.13 42.72L6.13 21.28L18.14 26.25Z" fill="#EDB65A"/>
+    <path d="M6.13 42.72L18.14 26.25L18.14 37.75Z" fill="#E6A23C"/>
+    <path d="M42.72 6.13L57.87 21.28L45.86 26.25Z" fill="#E6A23C"/>
+    <path d="M42.72 6.13L45.86 26.25L37.75 18.14Z" fill="#D48F2C"/>
+    <path d="M21.28 57.87L6.13 42.72L18.14 37.75Z" fill="#D48F2C"/>
+    <path d="M21.28 57.87L18.14 37.75L26.25 45.86Z" fill="#C27A20"/>
+    <path d="M42.72 57.87L21.28 57.87L26.25 45.86Z" fill="#C27A20"/>
+    <path d="M42.72 57.87L26.25 45.86L37.75 45.86Z" fill="#A9661A"/>
+    <path d="M57.87 42.72L42.72 57.87L37.75 45.86Z" fill="#A9661A"/>
+    <path d="M57.87 42.72L37.75 45.86L45.86 37.75Z" fill="#8A5214"/>
+  </g>
+</svg>

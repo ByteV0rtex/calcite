@@ -1,9 +1,21 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
   <rect x="64" y="64" width="896" height="896" rx="200" fill="#141518"/>
   <rect x="64.5" y="64.5" width="895" height="895" rx="199.5" fill="none" stroke="#2A2C31" stroke-width="1"/>
-  <g transform="translate(512 528) scale(29) translate(-12 -12.1)" stroke="#141518" stroke-width="0.35" stroke-linejoin="round">
-    <path d="M4.5 7.2 13 3l7 3.6-8.4 4.3z" fill="#F4CD86"/>
-    <path d="M4.5 7.2 11.6 10.9 11 21.2 4 17.2z" fill="#E6A23C"/>
-    <path d="M11.6 10.9 20 6.6l-.4 10.2-8.6 4.4z" fill="#A9661A"/>
+  <!-- The gem-cut C: an open octagon cut into fourteen facets, lit from the top left. -->
+  <g transform="translate(192 192) scale(10)" stroke="#141518" stroke-width="0.8" stroke-linejoin="round">
+    <path d="M6.13 21.28L21.28 6.13L26.25 18.14Z" fill="#FFE7B3"/>
+    <path d="M6.13 21.28L26.25 18.14L18.14 26.25Z" fill="#F4CD86"/>
+    <path d="M21.28 6.13L42.72 6.13L37.75 18.14Z" fill="#F4CD86"/>
+    <path d="M21.28 6.13L37.75 18.14L26.25 18.14Z" fill="#EDB65A"/>
+    <path d="M6.13 42.72L6.13 21.28L18.14 26.25Z" fill="#EDB65A"/>
+    <path d="M6.13 42.72L18.14 26.25L18.14 37.75Z" fill="#E6A23C"/>
+    <path d="M42.72 6.13L57.87 21.28L45.86 26.25Z" fill="#E6A23C"/>
+    <path d="M42.72 6.13L45.86 26.25L37.75 18.14Z" fill="#D48F2C"/>
+    <path d="M21.28 57.87L6.13 42.72L18.14 37.75Z" fill="#D48F2C"/>
+    <path d="M21.28 57.87L18.14 37.75L26.25 45.86Z" fill="#C27A20"/>
+    <path d="M42.72 57.87L21.28 57.87L26.25 45.86Z" fill="#C27A20"/>
+    <path d="M42.72 57.87L26.25 45.86L37.75 45.86Z" fill="#A9661A"/>
+    <path d="M57.87 42.72L42.72 57.87L37.75 45.86Z" fill="#A9661A"/>
+    <path d="M57.87 42.72L37.75 45.86L45.86 37.75Z" fill="#8A5214"/>
   </g>
 </svg>
