@@ -17,6 +17,8 @@ use crate::backend::Backend;
 /// Decoded-image budget. Roughly 300 icons at 128×128, or a few dozen
 /// gallery images.
 const BUDGET_BYTES: usize = 24 * 1024 * 1024;
+/// Images asked for within this many lookups count as on screen.
+const PROTECT_RECENT: u64 = 256;
 
 #[derive(Clone)]
 enum Slot {
@@ -110,10 +112,14 @@ impl Images {
 
     fn evict(&mut self) {
         while self.used_bytes > BUDGET_BYTES {
+            // Never drop what was just asked for: that's what is on screen,
+            // and dropping it would only load it again. Over budget is fine
+            // until those scroll away.
+            let recent = self.tick.saturating_sub(PROTECT_RECENT);
             let oldest = self
                 .slots
                 .iter()
-                .filter(|(_, (slot, _))| matches!(slot, Slot::Ready(..)))
+                .filter(|(_, (slot, used))| matches!(slot, Slot::Ready(..)) && *used < recent)
                 .min_by_key(|(_, (_, used))| *used)
                 .map(|(k, _)| k.clone());
             let Some(key) = oldest else { break };
