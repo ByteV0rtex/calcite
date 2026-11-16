@@ -184,6 +184,10 @@ pub struct InstancePage {
     selected: std::collections::HashSet<String>,
     /// Filters the content list.
     query: Entity<InputState>,
+    /// Filters the Worlds tab.
+    pub(crate) world_query: Entity<InputState>,
+    /// Worlds tab: only servers (Some(true)) or only singleplayer (Some(false)).
+    pub(crate) world_kind: Option<bool>,
     /// The log being shown: the live one (None) or a saved file.
     log_file: Option<(theseus::logs::LogType, String)>,
     /// Saved logs and crash reports, newest first.
@@ -204,6 +208,7 @@ impl InstancePage {
         let state = AppState::global(cx);
         let query = cx.new(|cx| InputState::new(window, cx).placeholder("Search content"));
         let log_query = cx.new(|cx| InputState::new(window, cx).placeholder("Search the log"));
+        let world_query = cx.new(|cx| InputState::new(window, cx).placeholder("Search worlds"));
         let mut subscriptions = vec![
             cx.subscribe(&query, |_, _, event: &InputEvent, cx| {
                 if let InputEvent::Change = event {
@@ -211,6 +216,11 @@ impl InstancePage {
                 }
             }),
             cx.subscribe(&log_query, |_, _, event: &InputEvent, cx| {
+                if let InputEvent::Change = event {
+                    cx.notify();
+                }
+            }),
+            cx.subscribe(&world_query, |_, _, event: &InputEvent, cx| {
                 if let InputEvent::Change = event {
                     cx.notify();
                 }
@@ -261,6 +271,8 @@ impl InstancePage {
             pack_confirm: None,
             selected: Default::default(),
             query,
+            world_query,
+            world_kind: None,
             log_file: None,
             log_files: None,
             old_log: None,

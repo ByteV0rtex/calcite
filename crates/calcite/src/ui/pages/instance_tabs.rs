@@ -17,6 +17,7 @@ use crate::ui::components::{
     Button, chip, empty_state, icon, icon_chip, relative_time, skeleton, state_chip,
 };
 use crate::ui::pages::instance::{InstancePage, InstancePageEvent};
+use gpui_kit::component::Sizable as _;
 use gpui_kit::component::menu::{ContextMenuExt, PopupMenu, PopupMenuItem};
 
 #[derive(Clone, Debug)]
@@ -473,6 +474,21 @@ impl InstancePage {
             }
             Some(Ok(w)) => w.clone(),
         };
+        let (servers_n, solo_n) = (
+            worlds.iter().filter(|w| w.server).count(),
+            worlds.iter().filter(|w| !w.server).count(),
+        );
+        let query = self.world_query.read(cx).value().trim().to_lowercase();
+        let kind = self.world_kind;
+        let worlds: Vec<WorldRow> = worlds
+            .into_iter()
+            .filter(|w| kind.is_none_or(|server| w.server == server))
+            .filter(|w| {
+                query.is_empty()
+                    || w.name.to_lowercase().contains(&query)
+                    || w.key.to_lowercase().contains(&query)
+            })
+            .collect();
         let instance_id = self.id().to_string();
         let dir = self.extra.instance_dir.clone();
         let mut list = div()
@@ -738,12 +754,62 @@ impl InstancePage {
                     .context_menu(menu),
             );
         }
+        let chip =
+            |key: &'static str, label: String, value: Option<bool>, cx: &mut Context<Self>| {
+                let active = kind == value;
+                div()
+                    .id(key)
+                    .h(px(28.0))
+                    .px(space(2.5))
+                    .flex()
+                    .items_center()
+                    .rounded(px(radius::SM))
+                    .text_size(px(type_scale::SMALL))
+                    .font_weight(gpui_kit::FontWeight::MEDIUM)
+                    .cursor_pointer()
+                    .when(active, |d| d.bg(p.raised).text_color(p.text))
+                    .when(!active, |d| {
+                        d.text_color(p.text_secondary)
+                            .hover(|s| s.text_color(p.text))
+                    })
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        this.world_kind = value;
+                        cx.notify();
+                    }))
+                    .child(label)
+            };
         let add_bar = div()
             .flex()
-            .justify_end()
+            .items_center()
             .gap(space(2.0))
             .px(space(8.0))
             .pt(space(4.0))
+            .child(chip(
+                "worlds-all",
+                format!("All {}", servers_n + solo_n),
+                None,
+                cx,
+            ))
+            .child(chip(
+                "worlds-solo",
+                format!("Singleplayer {solo_n}"),
+                Some(false),
+                cx,
+            ))
+            .child(chip(
+                "worlds-servers",
+                format!("Servers {servers_n}"),
+                Some(true),
+                cx,
+            ))
+            .child(div().flex_1())
+            .child(
+                div().w(px(200.0)).child(
+                    gpui_kit::component::input::Input::new(&self.world_query)
+                        .small()
+                        .cleanable(true),
+                ),
+            )
             .child(
                 Button::new("worlds-refresh")
                     .icon("refresh-cw")
