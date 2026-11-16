@@ -142,6 +142,14 @@ struct PackInfo {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
+enum Bulk {
+    Enable,
+    Disable,
+    Update,
+    Remove,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum PackConfirm {
     Reinstall,
     Unlink,
@@ -172,6 +180,8 @@ pub struct InstancePage {
     /// Show the modpack's own files in the list.
     pack_open: bool,
     pack_confirm: Option<PackConfirm>,
+    /// Rows picked for a bulk action, by path.
+    selected: std::collections::HashSet<String>,
     /// Filters the content list.
     query: Entity<InputState>,
     /// The log being shown: the live one (None) or a saved file.
@@ -249,6 +259,7 @@ impl InstancePage {
             pack: None,
             pack_open: false,
             pack_confirm: None,
+            selected: Default::default(),
             query,
             log_file: None,
             log_files: None,
@@ -584,6 +595,14 @@ impl InstancePage {
                 self.open_log(first, cx);
             }
             "dev-errors" => self.log_level = Some(LogLevel::Error),
+            "dev-select-3" => {
+                if let Some(Ok(rows)) = &self.content {
+                    let picked: Vec<String> = rows.iter().take(3).map(|r| r.path.clone()).collect();
+                    self.selected.extend(picked);
+                }
+            }
+            "dev-bulk-off" => self.bulk(Bulk::Disable, cx),
+            "dev-bulk-on" => self.bulk(Bulk::Enable, cx),
             "dev-freeze-update" => {
                 // Freeze the first row that has an update waiting.
                 let path = self
@@ -994,6 +1013,179 @@ impl InstancePage {
     pub(crate) fn content_changed(&mut self, cx: &mut Context<Self>) {
         self.load_content(cx);
         self.check_updates(cx);
+    }
+
+    /// Do one thing to every selected row: turn on (Some(true)), turn off
+    /// (Some(false)), update, or remove. Pack files are never removed.
+    fn bulk(&mut self, action: Bulk, cx: &mut Context<Self>) {
+        let Some(Ok(rows)) = &self.content else {
+            return;
+        };
+        let mut all: Vec<Row> = rows.clone();
+        all.extend(self.pack_rows.iter().cloned());
+        let picked: Vec<Row> = all
+            .into_iter()
+            .filter(|r| self.selected.contains(&r.path))
+            .collect();
+        self.selected.clear();
+        if picked.is_empty() {
+            cx.notify();
+            return;
+        }
+        if action == Bulk::Update {
+            let updates: Vec<theseus::install::ContentUpdateSelection> = picked
+                .iter()
+                .filter(|r| r.has_update && !r.locked)
+                .filter_map(|r| {
+                    Some(theseus::install::ContentUpdateSelection {
+                        project_path: r.path.clone(),
+                        version_id: r.update_version.clone()?,
+                    })
+                })
+                .collect();
+            if updates.is_empty() {
+                cx.notify();
+                return;
+            }
+            self.busy_paths
+                .extend(updates.iter().map(|u| u.project_path.clone()));
+            let id = self.id.clone();
+            let state = self.state.clone();
+            let call = Backend::global(cx)
+                .call(async move { theseus::install::bulk_update_content(id, updates).await });
+            cx.spawn(async move |_, cx| {
+                let result = call.await;
+                state.update(cx, |state, cx| {
+                    match result {
+                        Ok(job) => state.track_job(job, cx),
+                        Err(error) => {
+                            state.notify_error("Couldn't start the update", format!("{error:#}"))
+                        }
+                    }
+                    cx.notify();
+                });
+            })
+            .detach();
+            cx.notify();
+            return;
+        }
+        let targets: Vec<(String, bool)> = picked
+            .iter()
+            .filter(|r| match action {
+                Bulk::Enable => !r.enabled,
+                Bulk::Disable => r.enabled,
+                Bulk::Remove => !r.from_pack,
+                Bulk::Update => false,
+            })
+            .map(|r| (r.path.clone(), r.enabled))
+            .collect();
+        self.busy_paths
+            .extend(targets.iter().map(|(p, _)| p.clone()));
+        cx.notify();
+        let id = self.id.clone();
+        let call = Backend::global(cx).call(async move {
+            for (path, _) in targets {
+                match action {
+                    Bulk::Remove => theseus::instance::remove_project(&id, &path).await?,
+                    _ => {
+                        theseus::instance::toggle_disable_project(
+                            &id,
+                            &path,
+                            Some(action == Bulk::Enable),
+                        )
+                        .await?;
+                    }
+                }
+            }
+            Ok(())
+        });
+        self.after(call, "Couldn't change all of them", cx);
+    }
+
+    fn selection_bar(&self, visible: &[Row], cx: &mut Context<Self>) -> gpui_kit::Div {
+        let p = cx.palette().clone();
+        let count = self.selected.len();
+        let all_shown = visible.iter().all(|r| self.selected.contains(&r.path));
+        let paths: Vec<String> = visible.iter().map(|r| r.path.clone()).collect();
+        let action = |key: &'static str,
+                      glyph: &'static str,
+                      label: &'static str,
+                      bulk: Bulk,
+                      cx: &mut Context<Self>| {
+            Button::new(key)
+                .icon(glyph)
+                .label(label)
+                .small()
+                .ghost()
+                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.bulk(bulk, cx)))
+        };
+        div()
+            .flex()
+            .items_center()
+            .gap(space(2.0))
+            .mx(space(8.0))
+            .my(space(3.0))
+            .px(space(3.0))
+            .h(px(40.0))
+            .rounded(px(radius::MD))
+            .bg(p.accent_soft)
+            .child(
+                div()
+                    .id("select-all")
+                    .flex()
+                    .items_center()
+                    .gap(space(2.0))
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        if all_shown {
+                            this.selected.clear();
+                        } else {
+                            this.selected.extend(paths.iter().cloned());
+                        }
+                        cx.notify();
+                    }))
+                    .child(crate::ui::pages::library::checkbox(all_shown, cx))
+                    .child(
+                        div()
+                            .text_size(px(type_scale::BODY))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(p.text)
+                            .child(format!("{count} selected")),
+                    ),
+            )
+            .child(div().flex_1())
+            .child(action(
+                "bulk-enable",
+                "circle-check",
+                "Turn on",
+                Bulk::Enable,
+                cx,
+            ))
+            .child(action(
+                "bulk-disable",
+                "circle",
+                "Turn off",
+                Bulk::Disable,
+                cx,
+            ))
+            .child(action(
+                "bulk-update",
+                "refresh-cw",
+                "Update",
+                Bulk::Update,
+                cx,
+            ))
+            .child(action("bulk-remove", "trash", "Remove", Bulk::Remove, cx))
+            .child(
+                Button::new("bulk-clear")
+                    .icon("x")
+                    .small()
+                    .ghost()
+                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                        this.selected.clear();
+                        cx.notify();
+                    })),
+            )
     }
 
     fn set_locked(&mut self, path: String, locked: bool, cx: &mut Context<Self>) {
@@ -1756,7 +1948,7 @@ impl InstancePage {
             .iter()
             .filter(|r| r.has_update && r.update_version.is_some() && !r.locked)
             .count();
-        let toolbar = div()
+        let mut toolbar = div()
             .flex()
             .items_center()
             .gap(space(2.0))
@@ -1817,6 +2009,9 @@ impl InstancePage {
             .filter(|r| show_pack || !r.from_pack)
             .collect();
         let pack_card = self.pack_card(cx);
+        if !self.selected.is_empty() {
+            toolbar = self.selection_bar(&visible, cx);
+        }
         if visible.is_empty() && !self.pack_loading && pack_total == 0 {
             return div()
                 .size_full()
@@ -1899,6 +2094,8 @@ impl InstancePage {
             let busy = self.busy_paths.contains(&row.path);
             let (toggle_path, remove_path, enabled) =
                 (row.path.clone(), row.path.clone(), row.enabled);
+            let picked = self.selected.contains(&row.path);
+            let pick_path = row.path.clone();
             list = list.child(
                 div()
                     .id(ix)
@@ -1909,8 +2106,21 @@ impl InstancePage {
                     .px(space(3.0))
                     .border_b_1()
                     .border_color(p.border)
+                    .when(picked, |d| d.bg(p.hover))
                     .hover(|s| s.bg(p.surface))
                     .when(busy, |d| d.opacity(0.5))
+                    .child(
+                        div()
+                            .id(SharedString::from(format!("pick-{ix}")))
+                            .cursor_pointer()
+                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                if !this.selected.remove(&pick_path) {
+                                    this.selected.insert(pick_path.clone());
+                                }
+                                cx.notify();
+                            }))
+                            .child(crate::ui::pages::library::checkbox(picked, cx)),
+                    )
                     .child(
                         div()
                             .id(SharedString::from(format!("toggle-{ix}")))
