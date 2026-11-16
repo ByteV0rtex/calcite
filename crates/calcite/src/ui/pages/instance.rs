@@ -13,8 +13,8 @@ use crate::images::Images;
 use crate::state::{AppState, LogLevel, LogLine, parse_legacy_line};
 use crate::theme::{self, PaletteExt, radius, space, type_scale};
 use crate::ui::components::{
-    Button, ButtonSize, chip, empty_state, icon_chip, progress_bar, relative_time, short_duration,
-    skeleton, sparkline_chip, thumb,
+    Button, ButtonSize, chip, empty_state, icon, icon_chip, progress_bar, relative_time,
+    short_duration, skeleton, sparkline_chip, thumb,
 };
 use crate::ui::shell::{instance_icon, running_chip};
 
@@ -110,6 +110,7 @@ pub enum InstancePageEvent {
     AddContent(String),
     OpenProject(String),
     OpenSettings(String),
+    Share(String),
 }
 
 impl gpui_kit::EventEmitter<InstancePageEvent> for InstancePage {}
@@ -128,6 +129,9 @@ pub struct InstancePage {
     /// The modpack's own files (modpack instances only).
     pack_rows: Vec<Row>,
     pack_loading: bool,
+    /// Changes the owner published that this copy doesn't have yet
+    /// (shared instances you joined).
+    shared_update: Option<usize>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -171,6 +175,7 @@ impl InstancePage {
             extra: Default::default(),
             pack_rows: Vec::new(),
             pack_loading: false,
+            shared_update: None,
             _subscriptions: subscriptions,
         };
         page.load_content(cx);
@@ -178,7 +183,58 @@ impl InstancePage {
         page.check_updates(cx);
         page.load_health(cx);
         page.resume_bisect();
+        page.check_shared_update(cx);
         page
+    }
+
+    /// For a shared instance you joined: has the owner published changes?
+    fn check_shared_update(&mut self, cx: &mut Context<Self>) {
+        let joined = self
+            .state
+            .read(cx)
+            .instance(&self.id)
+            .and_then(|i| i.shared.clone())
+            .is_some_and(|s| !s.owner);
+        if !joined {
+            return;
+        }
+        let id = self.id.clone();
+        let task = Backend::global(cx)
+            .call(async move { theseus::instance::get_shared_instance_update_preview(&id).await });
+        cx.spawn(async move |this, cx| {
+            let Ok(Some(preview)) = task.await else {
+                return;
+            };
+            let _ = this.update(cx, |this, cx| {
+                this.shared_update = preview
+                    .update_available
+                    .then_some(preview.diffs.len().max(1));
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn apply_shared_update(&mut self, cx: &mut Context<Self>) {
+        self.shared_update = None;
+        let id = self.id.clone();
+        let task = Backend::global(cx).call(async move {
+            theseus::instance::update_shared_instance(&id)
+                .await
+                .map(|_| ())
+        });
+        cx.spawn(async move |this, cx| {
+            if let Err(error) = task.await {
+                let _ = this.update(cx, |this, cx| {
+                    this.state.update(cx, |s, cx| {
+                        s.notify_error("Couldn't update the shared instance", format!("{error:#}"));
+                        cx.notify();
+                    });
+                });
+            }
+        })
+        .detach();
+        cx.notify();
     }
 
     /// Ask Modrinth for newer versions of everything, then reload.
@@ -489,6 +545,8 @@ impl InstancePage {
             .map(|r| r.usage.iter().copied().collect())
             .unwrap_or_default();
         let job = state.job_for(&self.id).cloned();
+        // Share your own instances (or ones you already share), once signed in to Modrinth.
+        let can_share = state.modrinth.is_some() && inst.shared.as_ref().is_none_or(|s| s.owner);
         let source = instance_icon(&inst);
         let busy = job.is_some() || !inst.installed;
         let id = self.id.clone();
@@ -615,6 +673,16 @@ impl InstancePage {
                                         cx.emit(InstancePageEvent::OpenSettings(this.id.clone()))
                                     })),
                             )
+                            .when(can_share, |d| {
+                                d.child(
+                                    Button::new("instance-share")
+                                        .icon("share-2")
+                                        .ghost()
+                                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                            cx.emit(InstancePageEvent::Share(this.id.clone()))
+                                        })),
+                                )
+                            })
                             .child(
                                 Button::new("instance-folder")
                                     .icon("folder-open")
@@ -626,6 +694,37 @@ impl InstancePage {
                             .child(action),
                     ),
             )
+            .when_some(self.shared_update.filter(|_| !busy), |d, n| {
+                d.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(space(3.0))
+                        .p(space(3.0))
+                        .rounded(px(radius::MD))
+                        .bg(p.accent_soft)
+                        .child(icon("refresh-cw", 16.0, p.accent))
+                        .child(
+                            div()
+                                .flex_1()
+                                .text_size(px(type_scale::SMALL))
+                                .text_color(p.text)
+                                .child(format!(
+                                    "The owner changed this instance ({n} change{}).",
+                                    if n == 1 { "" } else { "s" }
+                                )),
+                        )
+                        .child(
+                            Button::new("shared-update")
+                                .label("Update")
+                                .small()
+                                .primary()
+                                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                    this.apply_shared_update(cx)
+                                })),
+                        ),
+                )
+            })
             .when_some(job, |d, job| {
                 d.child(
                     div()
@@ -1245,7 +1344,7 @@ impl Render for InstancePage {
     }
 }
 
-fn toggle(on: bool, cx: &App) -> impl IntoElement {
+pub(crate) fn toggle(on: bool, cx: &App) -> impl IntoElement {
     let p = cx.palette();
     div()
         .w(px(28.0))

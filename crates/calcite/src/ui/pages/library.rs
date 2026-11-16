@@ -37,6 +37,7 @@ pub fn render(shell: &mut Shell, window: &mut Window, cx: &mut Context<Shell>) -
     let card_w = card_width(available);
 
     let state = shell.state().read(cx);
+    let this_signed_in = state.modrinth.is_some();
     let filter = shell.library_filter.read(cx).value().to_string();
     let mut instances: Vec<InstanceInfo> = state
         .instances
@@ -102,6 +103,16 @@ pub fn render(shell: &mut Shell, window: &mut Window, cx: &mut Context<Shell>) -
                 .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.cycle_sort(cx))),
         )
         .child(div().flex_1())
+        .when(this_signed_in, |d| {
+            d.child(
+                Button::new("join-shared")
+                    .icon("link")
+                    .label("Join")
+                    .on_click(
+                        cx.listener(|this, _: &ClickEvent, window, cx| this.open_join(window, cx)),
+                    ),
+            )
+        })
         .child(
             Button::new("move-in")
                 .icon("arrow-down-to-line")

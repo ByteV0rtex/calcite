@@ -34,6 +34,16 @@ pub struct InstanceInfo {
     pub installed: bool,
     pub group_ids: Vec<String>,
     pub is_modpack: bool,
+    /// Set when this instance is shared through Modrinth.
+    pub shared: Option<SharedLink>,
+}
+
+/// How an instance is connected to a Modrinth shared instance.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SharedLink {
+    pub id: String,
+    /// You share it (rather than having joined someone else's).
+    pub owner: bool,
 }
 
 impl InstanceInfo {
@@ -55,6 +65,10 @@ impl InstanceInfo {
             installed: meta.instance.install_stage.as_str() == "installed",
             group_ids: meta.group_ids.clone(),
             is_modpack: !matches!(meta.link, theseus::data::InstanceLink::Unmanaged),
+            shared: meta.shared_instance.as_ref().map(|s| SharedLink {
+                id: s.id.clone(),
+                owner: matches!(s.role, theseus::data::SharedInstanceRole::Owner),
+            }),
         }
     }
 
@@ -215,6 +229,12 @@ pub struct AppState {
     pub content_revision: HashMap<String, u64>,
     /// Project ids being installed per instance (for "Installing…" buttons).
     pub installing: HashMap<String, Vec<String>>,
+    /// Signed in to Modrinth (friends, shared instances, your projects).
+    pub modrinth: Option<ModrinthUser>,
+    /// Set while the browser sign-in is open; sending cancels it.
+    pub modrinth_signing_in: Option<tokio::sync::oneshot::Sender<()>>,
+    pub friends: Vec<Friend>,
+    friends_task: Option<Task<()>>,
     refresh_task: Option<Task<()>>,
 }
 
@@ -223,6 +243,28 @@ pub struct Notice {
     pub title: SharedString,
     pub body: SharedString,
     pub is_error: bool,
+}
+
+/// The Modrinth account Calcite is signed in with.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ModrinthUser {
+    pub id: String,
+    pub username: SharedString,
+    pub avatar_url: Option<String>,
+}
+
+/// Someone on your Modrinth friends list, or a request either way.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Friend {
+    pub user_id: String,
+    pub username: SharedString,
+    pub avatar_url: Option<String>,
+    pub accepted: bool,
+    /// They asked you (only meaningful while not accepted).
+    pub incoming: bool,
+    pub online: bool,
+    /// The instance they're playing, if they share it.
+    pub playing: Option<SharedString>,
 }
 
 pub struct AppStateHandle(pub Entity<AppState>);
@@ -251,6 +293,10 @@ impl AppState {
             pending_copies: HashMap::new(),
             content_revision: HashMap::new(),
             installing: HashMap::new(),
+            modrinth: None,
+            modrinth_signing_in: None,
+            friends: Vec::new(),
+            friends_task: None,
             refresh_task: None,
         });
         cx.set_global(AppStateHandle(state.clone()));
@@ -283,6 +329,7 @@ impl AppState {
                     }
                     this.status = BackendStatus::Ready;
                     this.refresh_all(cx);
+                    this.refresh_modrinth(cx);
                     cx.notify();
                 }
                 Err(error) => {
@@ -358,6 +405,8 @@ impl AppState {
                 _ => {}
             },
             AppEvent::InstanceGroupsChanged(_) => self.schedule_refresh(cx),
+            // Requests, people coming online, what they play: re-read the list.
+            AppEvent::Friend(_) => self.refresh_friends(cx),
             AppEvent::Process(payload) => match payload.event {
                 ProcessPayloadType::Launched => {
                     self.logs.remove(&payload.instance_id);
@@ -486,6 +535,184 @@ impl AppState {
                     }
                 });
             }
+        })
+        .detach();
+    }
+
+    /// Look up who Calcite is signed in to Modrinth as.
+    pub fn refresh_modrinth(&mut self, cx: &mut Context<Self>) {
+        let fetch = Backend::global(cx).call(async {
+            let Some(creds) = theseus::mr_auth::get_credentials().await? else {
+                return Ok(None);
+            };
+            // The profile needs the network; fall back to the id offline.
+            let profile = theseus::users::get_user_profile(&creds.user_id).await.ok();
+            let field = |key: &str| {
+                profile
+                    .as_ref()
+                    .and_then(|p| p.get(key))
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string)
+            };
+            Ok(Some(ModrinthUser {
+                username: field("username")
+                    .unwrap_or_else(|| creds.user_id.clone())
+                    .into(),
+                avatar_url: field("avatar_url").filter(|u| !u.is_empty()),
+                id: creds.user_id,
+            }))
+        });
+        cx.spawn(async move |this, cx| {
+            let result = fetch.await;
+            let _ = this.update(cx, |this, cx| {
+                match result {
+                    Ok(user) => {
+                        this.modrinth = user;
+                        this.refresh_friends(cx);
+                    }
+                    Err(error) => tracing::warn!("reading the Modrinth account failed: {error:#}"),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Re-read the friends list (coalesced; friend events come in bursts).
+    pub fn refresh_friends(&mut self, cx: &mut Context<Self>) {
+        let Some(me) = self.modrinth.as_ref().map(|u| u.id.clone()) else {
+            self.friends.clear();
+            return;
+        };
+        let backend = Backend::global(cx).clone();
+        self.friends_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(200))
+                .await;
+            let fetch = backend.call(async move {
+                let list = theseus::friends::friends().await?;
+                let statuses = theseus::friends::friend_statuses()
+                    .await
+                    .unwrap_or_default();
+                let others: Vec<String> = list
+                    .iter()
+                    .map(|f| {
+                        if f.id == me {
+                            f.friend_id.clone()
+                        } else {
+                            f.id.clone()
+                        }
+                    })
+                    .collect();
+                let ids: Vec<&str> = others.iter().map(String::as_str).collect();
+                let users = theseus::cache::get_user_many(&ids, None)
+                    .await
+                    .unwrap_or_default();
+                let mut friends: Vec<Friend> = list
+                    .into_iter()
+                    .zip(others)
+                    .map(|(f, other)| {
+                        let user = users.iter().find(|u| u.id == other);
+                        let status = statuses.iter().find(|s| s.user_id.to_string() == other);
+                        Friend {
+                            username: user
+                                .map(|u| u.username.clone())
+                                .unwrap_or_else(|| other.clone())
+                                .into(),
+                            avatar_url: user.and_then(|u| u.avatar_url.clone()),
+                            accepted: f.accepted,
+                            incoming: !f.accepted && f.id == me,
+                            online: status.is_some(),
+                            playing: status.and_then(|s| s.profile_name.clone()).map(Into::into),
+                            user_id: other,
+                        }
+                    })
+                    .collect();
+                // Requests, then who's playing, who's online, everyone else.
+                friends.sort_by_key(|f| {
+                    let rank = match (f.accepted, f.online, f.playing.is_some()) {
+                        (false, ..) => 0,
+                        (true, true, true) => 1,
+                        (true, true, false) => 2,
+                        (true, false, _) => 3,
+                    };
+                    (rank, f.username.to_lowercase())
+                });
+                Ok(friends)
+            });
+            let result = fetch.await;
+            let _ = this.update(cx, |this, cx| {
+                match result {
+                    Ok(friends) => this.friends = friends,
+                    Err(error) => tracing::warn!("reading friends failed: {error:#}"),
+                }
+                cx.notify();
+            });
+        }));
+    }
+
+    /// Dev builds only: sample friends for screenshots.
+    #[cfg(feature = "snapshot")]
+    pub fn demo_friends(&mut self, cx: &mut Context<Self>) {
+        let friend =
+            |name: &str, accepted: bool, incoming: bool, online: bool, playing: Option<&str>| {
+                Friend {
+                    user_id: format!("demo-{name}"),
+                    username: name.to_string().into(),
+                    avatar_url: None,
+                    accepted,
+                    incoming,
+                    online,
+                    playing: playing.map(|p| p.to_string().into()),
+                }
+            };
+        self.modrinth = Some(ModrinthUser {
+            id: "demo-me".into(),
+            username: "you".into(),
+            avatar_url: None,
+        });
+        self.friends = vec![
+            friend("Mira", false, true, false, None),
+            friend("Tobi", true, false, true, Some("Create 1.20")),
+            friend("Sasha", true, false, true, None),
+            friend("Noah", true, false, false, None),
+            friend("Lena", true, false, false, None),
+            friend("Ravi", true, false, false, None),
+            friend("Ines", true, false, false, None),
+        ];
+        cx.notify();
+    }
+
+    /// Send a friend request, or accept one.
+    pub fn add_friend(&mut self, user_id: String, cx: &mut Context<Self>) {
+        let task =
+            Backend::global(cx).call(async move { theseus::friends::add_friend(&user_id).await });
+        self.after_friend_change(task, "Couldn't send that friend request", cx);
+    }
+
+    /// Unfriend, decline a request, or cancel one you sent.
+    pub fn remove_friend(&mut self, user_id: String, cx: &mut Context<Self>) {
+        self.friends.retain(|f| f.user_id != user_id);
+        let task = Backend::global(cx)
+            .call(async move { theseus::friends::remove_friend(&user_id).await });
+        self.after_friend_change(task, "Couldn't change that friendship", cx);
+    }
+
+    fn after_friend_change(
+        &mut self,
+        task: impl Future<Output = anyhow::Result<()>> + 'static,
+        failure: &'static str,
+        cx: &mut Context<Self>,
+    ) {
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| {
+                if let Err(error) = result {
+                    this.notify_error(failure, format!("{error:#}"));
+                }
+                this.refresh_friends(cx);
+                cx.notify();
+            });
         })
         .detach();
     }

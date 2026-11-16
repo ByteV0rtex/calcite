@@ -6,6 +6,7 @@ mod backend;
 mod cli;
 mod images;
 mod login;
+mod modrinth_login;
 mod prefs;
 mod state;
 mod theme;
@@ -95,6 +96,16 @@ fn main() {
             cx.set_global(Api(api));
             cx.set_global(backend.clone());
             AppState::start(events, cx);
+            // A skin change waits a moment before it's sent; send it now if
+            // Calcite is closing.
+            cx.on_app_quit(|cx| {
+                let flush = Backend::global(cx)
+                    .call(async { theseus::minecraft_skins::flush_pending_skin_change().await });
+                async move {
+                    let _ = flush.await;
+                }
+            })
+            .detach();
 
             let bounds = Bounds::centered(None, size(px(1280.0), px(820.0)), cx);
             let options = WindowOptions {
@@ -121,6 +132,11 @@ fn main() {
                         "game-settings" => Route::Settings(ui::pages::settings::Section::Game),
                         "storage" => Route::Settings(ui::pages::settings::Section::Storage),
                         "about" => Route::Settings(ui::pages::settings::Section::About),
+                        "skins" => Route::Skins,
+                        "user" => Route::User(
+                            std::env::var("CALCITE_SNAPSHOT_USER")
+                                .unwrap_or_else(|_| "jellysquid3".into()),
+                        ),
                         _ => Route::Home,
                     };
                     let shell = cx.new(|cx| Shell::new(start, window, cx));
@@ -210,12 +226,24 @@ fn take_snapshot(window: gpui_kit::AnyWindowHandle, page: String, out: String, c
                     wait(5000).await;
                     continue;
                 }
-                let _ = cx.update_window(window, |root, _, cx| {
+                if word == "demo-friends" {
+                    cx.update(|cx| AppState::global(cx).update(cx, |s, cx| s.demo_friends(cx)));
+                    continue;
+                }
+                let _ = cx.update_window(window, |root, window, cx| {
                     let Ok(root) = root.downcast::<Root>() else { return };
                     let Some(shell) = root.read(cx).view().clone().downcast::<Shell>().ok() else {
                         return;
                     };
                     shell.update(cx, |shell, cx| {
+                        if word == "join" {
+                            shell.open_join(window, cx);
+                        }
+                        if let Some(skins) = shell.skins_page()
+                            && word == "skins-back"
+                        {
+                            skins.update(cx, |s, cx| s.look_from_behind(cx));
+                        }
                         if let Some(storage) = shell.storage_page() {
                             match word.as_str() {
                                 "clean-logs" => storage.update(cx, |s, cx| s.delete_logs(cx)),
@@ -228,6 +256,7 @@ fn take_snapshot(window: gpui_kit::AnyWindowHandle, page: String, out: String, c
                             "works" => p.answer_bisect(false, cx),
                             "broken" => p.answer_bisect(true, cx),
                             "stop" => p.finish_bisect(Vec::new(), cx),
+                            "share" => cx.emit(ui::pages::instance::InstancePageEvent::Share(p.id().to_string())),
                             "play" => {
                                 let id = p.id().to_string();
                                 p.state().update(cx, |s, cx| s.play(&id, cx));

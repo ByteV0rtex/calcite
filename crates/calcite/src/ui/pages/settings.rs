@@ -270,8 +270,9 @@ fn accounts(shell: &mut Shell, cx: &mut Context<Shell>) -> AnyElement {
         );
     }
 
+    let modrinth = modrinth_account(shell, cx);
     scroll_body(
-        div().flex().flex_col().gap(space(4.0)).child(group(
+        div().flex().flex_col().gap(space(8.0)).child(group(
             "Microsoft accounts",
             Some("Sign-in happens in a small Microsoft window. Calcite never sees your password."),
             div()
@@ -280,7 +281,7 @@ fn accounts(shell: &mut Shell, cx: &mut Context<Shell>) -> AnyElement {
                 .gap(space(3.0))
                 .child(list)
                 .child(
-                    div().child(
+                    div().flex().child(
                         Button::new("settings-add-account")
                             .icon("user-plus")
                             .label("Add Microsoft account")
@@ -289,8 +290,102 @@ fn accounts(shell: &mut Shell, cx: &mut Context<Shell>) -> AnyElement {
                 )
                 .into_any_element(),
             cx,
+        ))
+        .child(group(
+            "Modrinth account",
+            Some("Optional. Lets you see friends, share instances with them, and play together. Sign-in happens in your browser."),
+            modrinth,
+            cx,
         )),
     )
+}
+
+fn modrinth_account(shell: &mut Shell, cx: &mut Context<Shell>) -> AnyElement {
+    let p = cx.palette().clone();
+    let state = shell.state().read(cx);
+    let user = state.modrinth.clone();
+    let waiting = state.modrinth_signing_in.is_some();
+    let row = div()
+        .flex()
+        .items_center()
+        .gap(space(3.0))
+        .px(space(4.0))
+        .py(space(3.0));
+    let body = match (user, waiting) {
+        (Some(user), _) => {
+            let avatar = user
+                .avatar_url
+                .as_deref()
+                .and_then(|u| crate::images::Images::get(u, 64, cx));
+            row.child(crate::ui::components::thumb(
+                avatar,
+                &user.username,
+                32.0,
+                radius::MD,
+                cx,
+            ))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_w_0()
+                    .child(
+                        div()
+                            .text_size(px(type_scale::BODY))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(p.text)
+                            .child(user.username.clone()),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(type_scale::SMALL))
+                            .text_color(p.text_muted)
+                            .child("Signed in to Modrinth"),
+                    ),
+            )
+            .child(
+                Button::new("modrinth-sign-out")
+                    .icon("log-out")
+                    .label("Sign out")
+                    .ghost()
+                    .small()
+                    .on_click(|_, _, cx| crate::modrinth_login::sign_out(cx)),
+            )
+        }
+        (None, true) => row
+            .child(icon("loader-circle", 16.0, p.accent))
+            .child(
+                div()
+                    .flex_1()
+                    .text_size(px(type_scale::BODY))
+                    .text_color(p.text_secondary)
+                    .child("Finish signing in in your browser, then come back here."),
+            )
+            .child(
+                Button::new("modrinth-cancel")
+                    .label("Cancel")
+                    .small()
+                    .on_click(|_, _, cx| crate::modrinth_login::cancel(cx)),
+            ),
+        (None, false) => row
+            .child(icon("globe", 16.0, p.text_muted))
+            .child(
+                div()
+                    .flex_1()
+                    .text_size(px(type_scale::BODY))
+                    .text_color(p.text_secondary)
+                    .child("Not signed in."),
+            )
+            .child(
+                Button::new("modrinth-sign-in")
+                    .icon("log-in")
+                    .label("Sign in to Modrinth")
+                    .small()
+                    .on_click(|_, _, cx| crate::modrinth_login::sign_in(cx)),
+            ),
+    };
+    panel(cx).overflow_hidden().child(body).into_any_element()
 }
 
 fn about(cx: &mut Context<Shell>) -> AnyElement {

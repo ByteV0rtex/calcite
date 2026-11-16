@@ -363,6 +363,7 @@ mod tests {
             installed: true,
             group_ids: vec![],
             is_modpack: false,
+            shared: None,
         }
     }
 

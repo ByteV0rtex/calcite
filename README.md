@@ -3,7 +3,7 @@
 A fast, native Minecraft launcher for macOS, Windows and Linux.
 
 - **Native.** Rust and GPUI, no webview. Idles at about 0% CPU and a fraction of the RAM of webview launchers.
-- **Everything you expect.** Instances, every mod loader, Modrinth modpacks, mods, resource packs and shaders, Microsoft accounts, managed Java.
+- **Everything you expect.** Instances, every mod loader, Modrinth modpacks, mods, resource packs and shaders, Microsoft accounts, managed Java, skins and capes with a 3D preview, Modrinth friends, shared instances, and settings kept the same across instances.
 - **More than a launcher.** Health checks, a crash doctor, find-the-broken-mod, a live game monitor, snapshots with rollback, world backups, storage cleanup, and moving in from other launchers. CurseForge, server lists and local servers are on the way.
 - **No ads, no purchases, no telemetry.**
 

@@ -1,8 +1,10 @@
 pub mod components;
 pub mod create_instance;
+pub mod friends;
 pub mod instance_picker;
 pub mod instance_settings;
 pub mod look;
 pub mod onboarding;
 pub mod pages;
+pub mod share;
 pub mod shell;

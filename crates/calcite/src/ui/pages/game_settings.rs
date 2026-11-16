@@ -29,7 +29,45 @@ pub struct GameSettings {
     width: Entity<InputState>,
     height: Entity<InputState>,
     saved: bool,
+    synced: Option<theseus::instance::GlobalSyncedOptions>,
+    syncing: bool,
 }
+
+use theseus::data::InstanceSyncedOption as Synced;
+
+/// What can be kept the same across instances, in the order shown.
+const SYNCED: [(Synced, &str, &str); 6] = [
+    (
+        Synced::GameOptions,
+        "Game settings",
+        "Video, sound, controls and keybinds",
+    ),
+    (
+        Synced::MultiplayerServers,
+        "Server list",
+        "Servers you've added in Multiplayer",
+    ),
+    (
+        Synced::ResourcePacks,
+        "Resource packs",
+        "Which packs are on, and their order",
+    ),
+    (
+        Synced::CreativeHotbars,
+        "Creative hotbars",
+        "Saved toolbars in Creative",
+    ),
+    (
+        Synced::CommandHistory,
+        "Command history",
+        "Chat commands you've typed",
+    ),
+    (
+        Synced::Screenshots,
+        "Screenshots",
+        "One shared screenshots folder",
+    ),
+];
 
 impl GameSettings {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -47,9 +85,121 @@ impl GameSettings {
             width: field("854", window, cx),
             height: field("480", window, cx),
             saved: false,
+            synced: None,
+            syncing: false,
         };
         this.load(window, cx);
+        this.load_synced(cx);
         this
+    }
+
+    fn load_synced(&mut self, cx: &mut Context<Self>) {
+        let task = Backend::global(cx)
+            .call(async { theseus::instance::get_global_synced_options().await });
+        cx.spawn(async move |this, cx| {
+            let Ok(options) = task.await else { return };
+            let _ = this.update(cx, |this, cx| {
+                this.synced = Some(options);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Turn syncing on (seeded from the instance you played last) or off.
+    fn set_synced(&mut self, option: Synced, on: bool, cx: &mut Context<Self>) {
+        let base = AppState::global(cx)
+            .read(cx)
+            .instances
+            .first()
+            .map(|i| i.id.clone());
+        self.syncing = true;
+        cx.notify();
+        let task = Backend::global(cx).call(async move {
+            theseus::instance::set_global_synced_option(option, on, base.as_deref()).await
+        });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| {
+                this.syncing = false;
+                match result {
+                    Ok(options) => this.synced = Some(options),
+                    Err(error) => AppState::global(cx).update(cx, |s, cx| {
+                        s.notify_error("Couldn't change syncing", format!("{error:#}"));
+                        cx.notify();
+                    }),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn synced_section(&self, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
+        let p = cx.palette().clone();
+        let last = AppState::global(cx)
+            .read(cx)
+            .instances
+            .first()
+            .map(|i| i.name.clone());
+        let mut list = panel(cx).overflow_hidden();
+        for (ix, (option, title, detail)) in SYNCED.into_iter().enumerate() {
+            let on = self.synced.as_ref().is_some_and(|s| s.get(option));
+            let ready = self.synced.is_some() && !self.syncing;
+            list = list.child(
+                div()
+                    .id(SharedString::from(format!("synced-{ix}")))
+                    .flex()
+                    .items_center()
+                    .gap(space(3.0))
+                    .px(space(4.0))
+                    .py(space(3.0))
+                    .when(ix > 0, |d| d.border_t_1().border_color(p.border))
+                    .when(ready, |d| {
+                        d.cursor_pointer()
+                            .hover(|s| s.bg(p.hover))
+                            .on_click(cx.listener(move |this, _: &gpui_kit::ClickEvent, _, cx| {
+                                this.set_synced(option, !on, cx)
+                            }))
+                    })
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .flex_1()
+                            .child(
+                                div()
+                                    .text_size(px(type_scale::BODY))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(p.text)
+                                    .child(title),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(type_scale::SMALL))
+                                    .text_color(p.text_muted)
+                                    .child(detail),
+                            ),
+                    )
+                    .child(crate::ui::pages::instance::toggle(on, cx)),
+            );
+        }
+        div()
+            .flex()
+            .flex_col()
+            .gap(space(3.0))
+            .child(section_heading("Same in every instance", cx))
+            .child(
+                div()
+                    .text_size(px(type_scale::SMALL))
+                    .text_color(p.text_muted)
+                    .child(match last {
+                        Some(name) => format!("Change it once and every instance follows. Turning one on starts from {name}, the instance you played last."),
+                        None => "Change it once and every instance follows.".to_string(),
+                    }),
+            )
+            .child(list)
+            .into_any_element()
     }
 
     fn load(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -358,6 +508,7 @@ impl Render for GameSettings {
                 })
         };
 
+        let synced = self.synced_section(cx);
         div()
             .id("game-settings-scroll")
             .size_full()
@@ -384,6 +535,7 @@ impl Render for GameSettings {
                             )
                             .child(java_list),
                     )
+                    .child(synced)
                     .child(
                         div()
                             .flex()

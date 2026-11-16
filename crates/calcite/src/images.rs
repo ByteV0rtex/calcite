@@ -119,6 +119,14 @@ impl Images {
     }
 }
 
+/// Turn an RGBA image into something GPUI can draw (it uploads BGRA).
+pub fn render_image(mut rgba: RgbaImage) -> Arc<RenderImage> {
+    for pixel in rgba.pixels_mut() {
+        pixel.0.swap(0, 2);
+    }
+    Arc::new(RenderImage::new(smallvec![Frame::new(rgba)]))
+}
+
 /// Decode, downscale to `max_px` on the longest edge, and convert to the
 /// BGRA layout GPUI uploads.
 fn decode(bytes: &[u8], max_px: u32) -> anyhow::Result<(Arc<RenderImage>, usize)> {

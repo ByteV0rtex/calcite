@@ -38,6 +38,9 @@ pub enum Route {
     /// A Modrinth project, optionally being added to an instance.
     Project(String, Option<String>),
     Settings(SettingsSection),
+    Skins,
+    /// A Modrinth user's page.
+    User(String),
     Gallery,
 }
 
@@ -77,10 +80,14 @@ pub struct Shell {
     move_in: Option<Entity<MoveInPage>>,
     game_settings: Option<Entity<crate::ui::pages::game_settings::GameSettings>>,
     storage: Option<Entity<crate::ui::pages::storage::StoragePage>>,
+    /// Only alive while Skins is open (it holds rendered thumbnails).
+    skins: Option<Entity<crate::ui::pages::skins::SkinsPage>>,
     dialog: Option<gpui_kit::AnyView>,
     pub library_filter: Entity<InputState>,
     pub library_sort: LibrarySort,
     account_menu_open: bool,
+    all_friends: bool,
+    user_page: Option<Entity<crate::ui::pages::user::UserPage>>,
     onboarding_step: Option<usize>,
     _subscriptions: Vec<Subscription>,
 }
@@ -120,10 +127,13 @@ impl Shell {
             move_in: None,
             game_settings: None,
             storage: None,
+            skins: None,
             dialog: None,
             library_filter,
             library_sort: LibrarySort::LastPlayed,
             account_menu_open: false,
+            all_friends: false,
+            user_page: None,
             onboarding_step: (!cx.global::<crate::prefs::Prefs>().onboarding_done).then_some(0),
             _subscriptions: subscriptions,
         };
@@ -153,6 +163,11 @@ impl Shell {
                         }
                         InstancePageEvent::OpenSettings(id) => {
                             this.open_instance_settings(id.clone(), window, cx)
+                        }
+                        InstancePageEvent::Share(id) => {
+                            let dialog =
+                                cx.new(|cx| crate::ui::share::ShareDialog::new(id.clone(), cx));
+                            this.show_dialog(dialog, cx);
                         }
                         InstancePageEvent::OpenProject(project) => {
                             this.navigate(Route::Project(project.clone(), None), window, cx)
@@ -190,6 +205,34 @@ impl Shell {
         }
         if route == Route::Settings(SettingsSection::MoveIn) {
             self.ensure_move_in(window, cx);
+        }
+        if let Route::User(id) = &route {
+            let reuse = self
+                .user_page
+                .as_ref()
+                .is_some_and(|p| p.read(cx).id() == id);
+            if !reuse {
+                use crate::ui::pages::user::{UserEvent, UserPage};
+                let page = cx.new(|cx| UserPage::new(id.clone(), cx));
+                cx.subscribe_in(
+                    &page,
+                    window,
+                    |this, _, event: &UserEvent, window, cx| match event {
+                        UserEvent::OpenProject(id) => {
+                            this.navigate(Route::Project(id.clone(), None), window, cx)
+                        }
+                    },
+                )
+                .detach();
+                self.user_page = Some(page);
+            }
+        }
+        if route == Route::Skins {
+            if self.skins.is_none() {
+                self.skins = Some(cx.new(crate::ui::pages::skins::SkinsPage::new));
+            }
+        } else {
+            self.skins = None;
         }
         // Storage is measured fresh each time it's opened.
         if route == Route::Settings(SettingsSection::Storage) && self.route != route {
@@ -335,13 +378,36 @@ impl Shell {
         self.navigate(Route::Discover, window, cx);
     }
 
-    /// Run `f` against the open instance page, if one is showing.
-    #[allow(dead_code)]
+    pub fn all_friends_shown(&self) -> bool {
+        self.all_friends
+    }
+
+    pub fn toggle_all_friends(&mut self, cx: &mut Context<Self>) {
+        self.all_friends = !self.all_friends;
+        cx.notify();
+    }
+
+    pub fn open_join(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let dialog = cx.new(|cx| crate::ui::share::JoinDialog::new(window, cx));
+        self.show_dialog(dialog, cx);
+    }
+
+    pub fn open_add_friend(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let dialog = cx.new(|cx| crate::ui::friends::AddFriendDialog::new(window, cx));
+        self.show_dialog(dialog, cx);
+    }
+
+    #[cfg_attr(not(feature = "snapshot"), allow(dead_code))]
+    pub fn skins_page(&self) -> Option<Entity<crate::ui::pages::skins::SkinsPage>> {
+        self.skins.clone()
+    }
+
     #[cfg_attr(not(feature = "snapshot"), allow(dead_code))]
     pub fn storage_page(&self) -> Option<Entity<crate::ui::pages::storage::StoragePage>> {
         self.storage.clone()
     }
 
+    /// Run `f` against the open instance page, if one is showing.
     #[cfg_attr(not(feature = "snapshot"), allow(dead_code))]
     pub fn with_instance_page(
         &mut self,
@@ -671,6 +737,14 @@ impl Shell {
                         Route::Discover,
                         route == Route::Discover,
                         cx,
+                    ))
+                    .child(nav_item(
+                        "nav-skins",
+                        "shirt",
+                        "Skins",
+                        Route::Skins,
+                        route == Route::Skins,
+                        cx,
                     )),
             )
             .when(!instances.is_empty(), |d| {
@@ -693,6 +767,7 @@ impl Shell {
                         .child(recent),
                 )
             })
+            .children(crate::ui::friends::sidebar_section(self, cx))
             .child(div().flex_1())
             .children(self.download_card(cx))
             .when(self.account_menu_open, |d| d.child(self.account_menu(cx)))
@@ -1033,6 +1108,14 @@ impl Shell {
                 let storage = self.storage.clone();
                 settings::render(self, section, move_in, game, storage, window, cx)
             }
+            Route::User(_) => match &self.user_page {
+                Some(page) => page.clone().into_any_element(),
+                None => div().into_any_element(),
+            },
+            Route::Skins => match &self.skins {
+                Some(page) => page.clone().into_any_element(),
+                None => div().into_any_element(),
+            },
             Route::Gallery => gallery::render(self, window, cx),
         }
     }
