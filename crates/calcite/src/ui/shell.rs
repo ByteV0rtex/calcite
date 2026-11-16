@@ -146,6 +146,7 @@ pub struct Shell {
     move_in: Option<Entity<MoveInPage>>,
     game_settings: Option<Entity<crate::ui::pages::game_settings::GameSettings>>,
     storage: Option<Entity<crate::ui::pages::storage::StoragePage>>,
+    advanced: Option<Entity<crate::ui::pages::advanced::AdvancedSettings>>,
     /// Re-read each time it's opened.
     screenshots: Option<Entity<crate::ui::pages::screenshots::ScreenshotsPage>>,
     /// Only alive while Skins is open (it holds rendered thumbnails).
@@ -223,6 +224,7 @@ impl Shell {
             move_in: None,
             game_settings: None,
             storage: None,
+            advanced: None,
             skins: None,
             screenshots: None,
             dialog: None,
@@ -370,6 +372,10 @@ impl Shell {
             }
         } else {
             self.skins = None;
+        }
+        if route == Route::Settings(SettingsSection::Advanced) && self.advanced.is_none() {
+            self.advanced =
+                Some(cx.new(|cx| crate::ui::pages::advanced::AdvancedSettings::new(window, cx)));
         }
         // Storage is measured fresh each time it's opened.
         if route == Route::Settings(SettingsSection::Storage) && self.route != route {
@@ -607,6 +613,10 @@ impl Shell {
     #[cfg_attr(not(feature = "snapshot"), allow(dead_code))]
     pub fn skins_page(&self) -> Option<Entity<crate::ui::pages::skins::SkinsPage>> {
         self.skins.clone()
+    }
+
+    pub fn advanced_page(&self) -> Option<Entity<crate::ui::pages::advanced::AdvancedSettings>> {
+        self.advanced.clone()
     }
 
     #[cfg_attr(not(feature = "snapshot"), allow(dead_code))]

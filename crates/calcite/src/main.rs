@@ -133,6 +133,7 @@ fn main() {
                         "game-settings" => Route::Settings(ui::pages::settings::Section::Game),
                         "storage" => Route::Settings(ui::pages::settings::Section::Storage),
                         "about" => Route::Settings(ui::pages::settings::Section::About),
+                        "advanced" => Route::Settings(ui::pages::settings::Section::Advanced),
                         "skins" => Route::Skins,
                         "screenshots" => Route::Screenshots,
                         "user" => Route::User(

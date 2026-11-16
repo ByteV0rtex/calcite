@@ -20,16 +20,18 @@ pub enum Section {
     Storage,
     MoveIn,
     Accounts,
+    Advanced,
     About,
 }
 
 impl Section {
-    const ALL: [Section; 6] = [
+    const ALL: [Section; 7] = [
         Section::Appearance,
         Section::Game,
         Section::Storage,
         Section::MoveIn,
         Section::Accounts,
+        Section::Advanced,
         Section::About,
     ];
     fn label(self) -> &'static str {
@@ -39,6 +41,7 @@ impl Section {
             Section::Storage => "Storage",
             Section::MoveIn => "Move in",
             Section::Accounts => "Accounts",
+            Section::Advanced => "Advanced",
             Section::About => "About",
         }
     }
@@ -49,6 +52,7 @@ impl Section {
             Section::Storage => "hard-drive",
             Section::MoveIn => "arrow-down-to-line",
             Section::Accounts => "user",
+            Section::Advanced => "sliders-horizontal",
             Section::About => "info",
         }
     }
@@ -145,6 +149,10 @@ pub fn render(
                 .child(group("Behavior", None, behavior(cx), cx)),
         ),
         Section::Accounts => accounts(shell, cx),
+        Section::Advanced => match shell.advanced_page() {
+            Some(page) => page.into_any_element(),
+            None => div().into_any_element(),
+        },
         Section::About => about(cx),
     };
 

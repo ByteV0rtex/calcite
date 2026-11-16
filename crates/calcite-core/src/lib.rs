@@ -31,3 +31,8 @@ pub fn user_agent() -> String {
         std::env::consts::OS
     )
 }
+
+/// The operating system's version, like "15.2" or "11 (26100)".
+pub fn os_version() -> String {
+    sysinfo::System::os_version().unwrap_or_default()
+}

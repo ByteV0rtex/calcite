@@ -1,3 +1,4 @@
+pub mod advanced;
 pub mod discover;
 pub mod files_tab;
 pub mod gallery;
