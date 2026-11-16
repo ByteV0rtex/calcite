@@ -9,6 +9,7 @@ mod login;
 mod modrinth_login;
 mod prefs;
 mod shortcuts;
+mod single;
 mod state;
 mod theme;
 mod ui;
@@ -57,6 +58,39 @@ fn main() {
                 .map(str::to_string)
         })
         .unwrap_or_default();
+
+    // One copy per data folder: a second launch hands over and quits.
+    let opened: Vec<std::path::PathBuf> = args
+        .iter()
+        .filter(|a| !a.starts_with("--"))
+        .map(std::path::PathBuf::from)
+        .filter(|p| p.exists())
+        .collect();
+    let requests = match (&snapshot, backend::data_dir()) {
+        (None, Some(dir)) => {
+            let request = if opened.is_empty() {
+                single::Request::Focus
+            } else {
+                single::Request::Open(opened.clone())
+            };
+            match single::claim(&dir, &request) {
+                Ok(single::Claim::Handed) => {
+                    println!("Calcite is already open; switched to it.");
+                    return;
+                }
+                Ok(single::Claim::First { lock, requests }) => {
+                    // Held until Calcite quits.
+                    Box::leak(Box::new(lock));
+                    Some(requests)
+                }
+                Err(error) => {
+                    tracing::warn!("couldn't check for another copy of Calcite: {error:#}");
+                    None
+                }
+            }
+        }
+        _ => None,
+    };
 
     let (backend, events) = match Backend::start() {
         Ok(started) => started,
@@ -162,6 +196,45 @@ fn main() {
                 ui::shell::TogglePalette,
                 None,
             )]);
+            // Later launches: come to the front, and open what they were given.
+            let with_shell = move |cx: &mut App,
+                                   f: &dyn Fn(
+                &mut Shell,
+                &mut gpui_kit::Window,
+                &mut gpui_kit::Context<Shell>,
+            )| {
+                let _ = window.update(cx, |root, window, cx| {
+                    window.activate_window();
+                    if let Ok(shell) = root.view().clone().downcast::<Shell>() {
+                        shell.update(cx, |s, cx| f(s, window, cx));
+                    }
+                });
+            };
+            if !opened.is_empty() {
+                let paths = opened.clone();
+                with_shell(cx, &move |s, window, cx| {
+                    s.handle_drop(paths.clone(), window, cx)
+                });
+            }
+            if let Some(mut requests) = requests {
+                cx.spawn(async move |cx| {
+                    use futures::StreamExt as _;
+                    while let Some(request) = requests.next().await {
+                        cx.update(|cx| {
+                            cx.activate(true);
+                            match request {
+                                single::Request::Focus => with_shell(cx, &|_, _, _| {}),
+                                single::Request::Open(paths) => {
+                                    with_shell(cx, &move |s, window, cx| {
+                                        s.handle_drop(paths.clone(), window, cx)
+                                    })
+                                }
+                            }
+                        });
+                    }
+                })
+                .detach();
+            }
             cx.on_action(move |_: &ui::shell::TogglePalette, cx| {
                 let _ = window.update(cx, |root, window, cx| {
                     if let Ok(shell) = root.view().clone().downcast::<Shell>() {
