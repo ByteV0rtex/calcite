@@ -2645,7 +2645,11 @@ impl Render for InstancePage {
             .flex_col()
             .child(self.header(cx))
             .child(self.tabs(cx))
-            .child(div().flex_1().min_h_0().child(body))
+            .child(crate::ui::motion::fade(
+                div().flex_1().min_h_0().child(body),
+                SharedString::from(format!("tab-{:?}", self.tab)),
+                0,
+            ))
             .into_any_element()
     }
 }

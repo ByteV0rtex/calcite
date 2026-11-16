@@ -40,6 +40,8 @@ struct Found {
 }
 
 pub struct MoveInPage {
+    /// Shown inside the onboarding: no page padding of its own.
+    pub embedded: bool,
     found: Option<Found>,
     staging: Staging,
     started: HashSet<String>,
@@ -60,6 +62,7 @@ fn launcher_label(kind: ImportLauncherType) -> &'static str {
 impl MoveInPage {
     pub fn new(_window: &mut Window, cx: &mut Context<Self>) -> Self {
         let mut page = MoveInPage {
+            embedded: false,
             found: None,
             staging: Staging::Idle,
             started: HashSet::new(),
@@ -672,8 +675,8 @@ impl Render for MoveInPage {
                     .flex()
                     .flex_col()
                     .gap(space(5.0))
-                    .px(space(8.0))
-                    .py(space(8.0))
+                    .when(!self.embedded, |d| d.px(space(8.0)).py(space(8.0)))
+                    .when(self.embedded, |d| d.pb(space(4.0)))
                     .max_w(px(880.0))
                     .child(list),
             )

@@ -83,7 +83,9 @@ impl Images {
             } else {
                 client.bytes(&url).await?
             };
-            decode(&bytes, max_px)
+            // Decoding is CPU work: keep it off the async workers so
+            // downloads and the backend don't stall behind big pictures.
+            tokio::task::spawn_blocking(move || decode(&bytes, max_px)).await?
         });
         cx.spawn(async move |cx| {
             let result = fetch.await.and_then(|r| r);
@@ -91,6 +93,7 @@ impl Images {
                 let images = cx.global_mut::<Images>();
                 let slot = match result {
                     Ok((image, size)) => {
+                        tracing::debug!("image {key} ready ({size} bytes)");
                         images.used_bytes += size;
                         Slot::Ready(image, size)
                     }

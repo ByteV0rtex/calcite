@@ -158,6 +158,8 @@ pub struct Shell {
     dialog: Option<gpui_kit::AnyView>,
     /// The ⌘K command palette, while it's open.
     palette: Option<Entity<CommandPalette>>,
+    /// Counts dialogs and palettes opened, so each one animates in.
+    overlay_seq: usize,
     pub library_filter: Entity<InputState>,
     /// The title bar search field.
     global_search: Entity<InputState>,
@@ -235,6 +237,7 @@ impl Shell {
             screenshots: None,
             dialog: None,
             palette: None,
+            overlay_seq: 0,
             library_filter,
             global_search,
             pending_change_version: None,
@@ -452,8 +455,14 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if step == 1 {
+        if step == 2 {
             self.ensure_move_in(window, cx);
+            if let Some(page) = &self.move_in {
+                page.update(cx, |p, cx| {
+                    p.embedded = true;
+                    cx.notify();
+                });
+            }
         }
         self.onboarding_step = Some(step.min(crate::ui::onboarding::STEPS.len() - 1));
         cx.notify();
@@ -462,6 +471,12 @@ impl Shell {
     pub fn finish_onboarding(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         crate::prefs::Prefs::finish_onboarding(cx);
         self.onboarding_step = None;
+        if let Some(page) = &self.move_in {
+            page.update(cx, |p, cx| {
+                p.embedded = false;
+                cx.notify();
+            });
+        }
         let has_instances = !self.state.read(cx).instances.is_empty();
         self.set_route(
             if has_instances {
@@ -533,6 +548,7 @@ impl Shell {
         })
         .detach();
         self.dialog = Some(dialog.into());
+        self.overlay_seq += 1;
         cx.notify();
     }
 
@@ -663,6 +679,7 @@ impl Shell {
         )
         .detach();
         self.palette = Some(palette);
+        self.overlay_seq += 1;
         cx.notify();
     }
 
@@ -1666,59 +1683,73 @@ impl Shell {
         let p = cx.palette().clone();
         let notice = self.state.read(cx).notice.clone()?;
         let accent = if notice.is_error { p.danger } else { p.accent };
+        let key = {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            notice.title.hash(&mut h);
+            notice.body.hash(&mut h);
+            h.finish()
+        };
+        let toast = div()
+            .w(px(380.0))
+            .p(space(4.0))
+            .rounded(px(radius::LG))
+            .bg(p.overlay)
+            .border_1()
+            .border_color(p.border_strong)
+            .shadow_lg()
+            .flex()
+            .gap(space(3.0))
+            .child(icon(
+                if notice.is_error {
+                    "circle-alert"
+                } else {
+                    "info"
+                },
+                18.0,
+                accent,
+            ))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_w_0()
+                    .gap(space(1.0))
+                    .child(
+                        div()
+                            .text_size(px(type_scale::BODY))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(p.text)
+                            .child(notice.title.clone()),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(type_scale::SMALL))
+                            .text_color(p.text_secondary)
+                            .child(notice.body.clone()),
+                    ),
+            )
+            .child(
+                Button::new("dismiss-notice")
+                    .icon("x")
+                    .ghost()
+                    .small()
+                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                        this.state.update(cx, |state, cx| state.dismiss_notice(cx))
+                    })),
+            );
         Some(
             div()
                 .absolute()
                 .bottom(space(5.0))
                 .right(space(5.0))
-                .w(px(380.0))
-                .p(space(4.0))
-                .rounded(px(radius::LG))
-                .bg(p.overlay)
-                .border_1()
-                .border_color(p.border_strong)
-                .shadow_lg()
-                .flex()
-                .gap(space(3.0))
-                .child(icon(
-                    if notice.is_error {
-                        "circle-alert"
-                    } else {
-                        "info"
-                    },
-                    18.0,
-                    accent,
+                .child(crate::ui::motion::rise(
+                    toast,
+                    SharedString::from(format!("notice-{key}")),
+                    0,
+                    12.0,
                 ))
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .flex_1()
-                        .min_w_0()
-                        .gap(space(1.0))
-                        .child(
-                            div()
-                                .text_size(px(type_scale::BODY))
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(p.text)
-                                .child(notice.title.clone()),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(type_scale::SMALL))
-                                .text_color(p.text_secondary)
-                                .child(notice.body.clone()),
-                        ),
-                )
-                .child(
-                    Button::new("dismiss-notice")
-                        .icon("x")
-                        .ghost()
-                        .small()
-                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                            this.state.update(cx, |state, cx| state.dismiss_notice(cx))
-                        })),
-                )
                 .into_any_element(),
         )
     }
@@ -1738,6 +1769,16 @@ impl Render for Shell {
         let p = cx.palette().clone();
         let page = self.page(window, cx);
         let notice = self.notice(cx);
+        // During onboarding the title bar only holds the window controls.
+        let title_bar = if self.onboarding_step.is_some() {
+            TitleBar::new()
+                .h(px(TITLE_BAR_HEIGHT))
+                .bg(p.app)
+                .border_color(p.app)
+                .into_any_element()
+        } else {
+            self.title_bar(cx).into_any_element()
+        };
         let dialog = self.dialog.clone();
         let drop_ring = p.accent;
         div()
@@ -1759,7 +1800,7 @@ impl Render for Shell {
             .text_color(p.text)
             .font_family(theme::fonts::UI)
             .text_size(px(type_scale::BODY))
-            .child(self.title_bar(cx))
+            .child(title_bar)
             .child(
                 div()
                     .flex()
@@ -1774,12 +1815,17 @@ impl Render for Shell {
                             .min_w_0()
                             .h_full()
                             .relative()
-                            .child(page)
+                            .child(crate::ui::motion::fade(
+                                div().size_full().child(page),
+                                SharedString::from(format!("page-{:?}", self.route)),
+                                0,
+                            ))
                             .children(notice),
                     ),
             )
             .when_some(self.palette.clone(), |d, palette| {
-                d.child(
+                let seq = self.overlay_seq;
+                d.child(crate::ui::motion::fade(
                     div()
                         .id("palette-scrim")
                         .absolute()
@@ -1789,7 +1835,7 @@ impl Render for Shell {
                         .flex()
                         .justify_center()
                         .pt(px(96.0))
-                        .child(
+                        .child(crate::ui::motion::rise(
                             div()
                                 .on_mouse_down_out(cx.listener(
                                     |this, _: &gpui_kit::MouseDownEvent, _, cx| {
@@ -1798,11 +1844,17 @@ impl Render for Shell {
                                     },
                                 ))
                                 .child(palette),
-                        ),
-                )
+                            ("palette-panel", seq),
+                            0,
+                            -8.0,
+                        )),
+                    ("palette-scrim-in", seq),
+                    0,
+                ))
             })
             .when_some(dialog, |d, dialog| {
-                d.child(
+                let seq = self.overlay_seq;
+                d.child(crate::ui::motion::fade(
                     div()
                         .id("dialog-scrim")
                         .absolute()
@@ -1812,8 +1864,15 @@ impl Render for Shell {
                         .flex()
                         .items_center()
                         .justify_center()
-                        .child(dialog),
-                )
+                        .child(crate::ui::motion::rise(
+                            div().child(dialog),
+                            ("dialog-panel", seq),
+                            0,
+                            10.0,
+                        )),
+                    ("dialog-scrim-in", seq),
+                    0,
+                ))
             })
     }
 }

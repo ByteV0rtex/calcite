@@ -60,12 +60,17 @@ fn main() {
         .unwrap_or_default();
 
     // One copy per data folder: a second launch hands over and quits.
-    let opened: Vec<std::path::PathBuf> = args
-        .iter()
-        .filter(|a| !a.starts_with("--"))
-        .map(std::path::PathBuf::from)
-        .filter(|p| p.exists())
-        .collect();
+    // Files Calcite was asked to open (a double-clicked .mrpack, say).
+    // Snapshot runs pass their own paths, which are not for opening.
+    let opened: Vec<std::path::PathBuf> = if snapshot.is_some() {
+        Vec::new()
+    } else {
+        args.iter()
+            .filter(|a| !a.starts_with("--"))
+            .map(std::path::PathBuf::from)
+            .filter(|p| p.exists())
+            .collect()
+    };
     let requests = match (&snapshot, backend::data_dir()) {
         (None, Some(dir)) => {
             let request = if opened.is_empty() {
@@ -256,7 +261,15 @@ fn take_snapshot(window: gpui_kit::AnyWindowHandle, page: String, out: String, c
     cx.spawn(async move |cx| {
         let executor = cx.background_executor().clone();
         let wait = |ms| executor.timer(std::time::Duration::from_millis(ms));
-        wait(2500).await;
+        wait(1500).await;
+        // Wait for the instance list (up to 15 s) so pages that need it open.
+        for _ in 0..60 {
+            let ready = cx.update(|cx| !AppState::global(cx).read(cx).instances.is_empty());
+            if ready {
+                break;
+            }
+            wait(250).await;
+        }
         // Pages that need app state are opened once the backend is ready.
         let _ = cx.update_window(window, |root, window, cx| {
             let Ok(root) = root.downcast::<Root>() else {
@@ -299,7 +312,7 @@ fn take_snapshot(window: gpui_kit::AnyWindowHandle, page: String, out: String, c
                         }
                     }
                     ("create", _) => shell.open_create_dialog(window, cx),
-                    ("onboarding-movein", _) => shell.set_onboarding_step(1, window, cx),
+                    ("onboarding-movein", _) => shell.set_onboarding_step(2, window, cx),
                     ("project", _) => shell.navigate(Route::Project("sodium".into(), None), window, cx),
                     ("discover-instance", Some(id)) => shell.open_discover(Some(id), window, cx),
                     ("picker", _) => shell.open_picker(
@@ -380,6 +393,9 @@ fn take_snapshot(window: gpui_kit::AnyWindowHandle, page: String, out: String, c
                         if let Some(path) = word.strip_prefix("drop=") {
                             shell.handle_drop(vec![path.into()], window, cx);
                         }
+                        if let Some(step) = word.strip_prefix("onboarding=") {
+                            shell.set_onboarding_step(step.parse().unwrap_or(0), window, cx);
+                        }
                         if word == "palette" {
                             shell.toggle_palette(window, cx);
                         }
@@ -442,7 +458,14 @@ fn take_snapshot(window: gpui_kit::AnyWindowHandle, page: String, out: String, c
             }
         }
         wait(3500).await;
-        // Draw explicitly: macOS pauses drawing for windows hidden behind others.
+        // Draw explicitly: macOS pauses drawing for windows hidden behind
+        // others. Draw once, then again after the arrival animations would
+        // have finished, since they measure time between frames.
+        let _ = cx.update_window(window, |_, window, cx| {
+            window.refresh();
+            window.draw(cx).clear(cx);
+        });
+        wait(700).await;
         let result = cx.update_window(window, |_, window, cx| {
             window.refresh();
             window.draw(cx).clear(cx);
