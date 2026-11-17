@@ -376,7 +376,7 @@ pub fn dawn_installations(home: &Path) -> Vec<Installation> {
             })
         })
         .collect();
-    list.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    list.sort_by_key(|i| i.name.to_lowercase());
     list
 }
 
