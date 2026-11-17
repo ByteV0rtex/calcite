@@ -1114,6 +1114,7 @@ dependencies = [
  "reflink-copy",
  "reqwest",
  "resvg 0.45.1",
+ "rustls",
  "serde",
  "serde_json",
  "sha1",

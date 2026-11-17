@@ -271,6 +271,69 @@ impl Client {
 mod tests {
     use super::*;
 
+    /// Talks to the real API: `CALCITE_CURSEFORGE_KEY=… cargo test -p
+    /// calcite-core curseforge -- --ignored`.
+    #[tokio::test]
+    #[ignore = "needs a CurseForge key and the network"]
+    async fn live_search_pick_and_download() {
+        use sha1::Digest as _;
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let http = reqwest::Client::builder()
+            .user_agent("calcite-tests")
+            .build()
+            .unwrap();
+        let client = Client::new(http.clone()).expect("build with CALCITE_CURSEFORGE_KEY set");
+        let results = client
+            .search(&Query {
+                text: "Just Enough Items".into(),
+                class: Some(Class::Mods),
+                game_version: Some("1.20.1".into()),
+                loader: Some("forge".into()),
+                offset: 0,
+            })
+            .await
+            .unwrap();
+        assert!(results.total > 0);
+        let jei = results
+            .projects
+            .iter()
+            .find(|p| p.slug == "jei")
+            .expect("JEI is found");
+        let files = client
+            .files(jei.id, Some("1.20.1"), Some("forge"))
+            .await
+            .unwrap();
+        let file = files
+            .iter()
+            .find(|f| f.download_url.is_some())
+            .expect("a downloadable 1.20.1 Forge file");
+        assert!(
+            file.game_versions.iter().any(|v| v == "1.20.1"),
+            "{:?}",
+            file.game_versions
+        );
+        let bytes = http
+            .get(file.download_url.as_ref().unwrap())
+            .send()
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap();
+        let got: String = sha1::Sha1::digest(&bytes)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        assert_eq!(Some(got.as_str()), file.sha1());
+        assert!(bytes.starts_with(b"PK"), "a jar");
+        println!(
+            "ok: {} → {} ({} bytes)",
+            jei.name,
+            file.file_name,
+            bytes.len()
+        );
+    }
+
     #[test]
     fn queries_carry_the_filters() {
         let q = Query {

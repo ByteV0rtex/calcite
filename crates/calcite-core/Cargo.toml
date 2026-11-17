@@ -38,3 +38,5 @@ tempfile = "3.27.0"
 resvg = { version = "0.45.1", default-features = false }
 image = { workspace = true, features = ["ico"] }
 tokio = { workspace = true, features = ["rt", "macros"] }
+# TLS for the live API tests (the app installs the same provider at startup).
+rustls = { version = "0.23.46", default-features = false, features = ["ring"] }
