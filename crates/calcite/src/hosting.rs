@@ -481,11 +481,28 @@ fn spawn(server: &LocalServer, java: &Path, events: UnboundedSender<Event>) -> a
         std::thread::Builder::new()
             .name(name.into())
             .spawn(move || {
-                for line in BufReader::new(pipe).lines().map_while(Result::ok) {
+                // Keep reading even past text that isn't UTF-8: a reader
+                // that stops would fill the pipe and freeze the server.
+                let mut reader = BufReader::new(pipe);
+                let mut buf = Vec::new();
+                loop {
+                    buf.clear();
+                    match reader.read_until(b'\n', &mut buf) {
+                        Ok(0) | Err(_) => break,
+                        Ok(_) => {}
+                    }
+                    let line = String::from_utf8_lossy(&buf)
+                        .trim_end_matches(['\n', '\r'])
+                        .to_string();
                     if events
                         .unbounded_send(Event::Line(dir.clone(), line))
                         .is_err()
                     {
+                        // Calcite is going away; keep draining so the
+                        // server never blocks on a full pipe.
+                        while reader.read_until(b'\n', &mut buf).is_ok_and(|n| n > 0) {
+                            buf.clear();
+                        }
                         break;
                     }
                 }
@@ -523,7 +540,7 @@ mod tests {
         let java = dir.path().join("fake-java");
         std::fs::write(
             &java,
-            "#!/bin/sh\necho 'Done (1.0s)! For help, type \"help\"'\n\
+            "#!/bin/sh\nprintf 'caf\\351\\n'\necho 'Done (1.0s)! For help, type \"help\"'\n\
              while read line; do echo \"got $line\"; [ \"$line\" = stop ] && exit 0; done\n",
         )
         .unwrap();
@@ -561,7 +578,8 @@ mod tests {
                 }
             }
         });
-        assert!(lines[0].starts_with("Done ("), "{lines:?}");
+        assert_eq!(lines[0], "caf\u{fffd}", "bad UTF-8 is shown, not fatal");
+        assert!(lines[1].starts_with("Done ("), "{lines:?}");
         assert!(lines.contains(&"got say hi".to_string()), "{lines:?}");
         assert!(lines.contains(&"got stop".to_string()), "{lines:?}");
         assert_eq!(code, Some(0));
