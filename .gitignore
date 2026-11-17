@@ -7,3 +7,6 @@
 
 # Screenshots made while developing (they show personal data); kept locally only.
 docs/screenshots/
+
+# Never commit API keys.
+.curseforge-key

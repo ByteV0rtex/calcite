@@ -37,6 +37,17 @@ trap 'rm -rf "$STAGE"' EXIT
 cp -R "$APP" "$STAGE/"
 ln -s /Applications "$STAGE/Applications"
 rm -f "$DMG"
-hdiutil create -quiet -volname Calcite -srcfolder "$STAGE" -ov -format UDZO "$DMG"
+# Right after a build macOS may still be scanning the new binary, and
+# hdiutil then fails with "Resource busy": try a few times.
+for attempt in 1 2 3 4 5; do
+  if hdiutil create -volname Calcite -srcfolder "$STAGE" -ov -format UDZO "$DMG" >/dev/null; then
+    break
+  fi
+  if [[ $attempt == 5 ]]; then
+    echo "hdiutil couldn't make the .dmg" >&2
+    exit 1
+  fi
+  sleep 3
+done
 echo "$APP"
 echo "$DMG"
