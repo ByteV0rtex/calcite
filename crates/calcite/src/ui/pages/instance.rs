@@ -22,6 +22,16 @@ use crate::ui::components::{
 };
 use crate::ui::shell::{instance_icon, running_chip};
 
+/// Tabs the player can hide in Settings → Appearance (Content stays).
+pub const OPTIONAL_TABS: [&str; 6] = [
+    "Health",
+    "Worlds",
+    "Screenshots",
+    "Snapshots",
+    "Files",
+    "Logs",
+];
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tab {
     Content,
@@ -1812,6 +1822,7 @@ impl InstancePage {
             .px(space(8.0))
             .border_b_1()
             .border_color(p.border);
+        let hidden_tabs = cx.global::<crate::prefs::Prefs>().hidden_tabs.clone();
         for (tab, label, badge) in [
             (
                 Tab::Content,
@@ -1836,6 +1847,9 @@ impl InstancePage {
             (Tab::Logs, "Logs", None),
         ] {
             let active = tab == self.tab;
+            if !active && hidden_tabs.iter().any(|h| h == label) {
+                continue;
+            }
             row = row.child(
                 div()
                     .id(SharedString::from(format!("tab-{label}")))

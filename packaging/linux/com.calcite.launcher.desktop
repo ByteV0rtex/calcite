@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Calcite
+GenericName=Minecraft Launcher
+Comment=A fast, native Minecraft launcher
+Exec=calcite %F
+Icon=com.calcite.launcher
+Terminal=false
+Categories=Game;
+Keywords=minecraft;modrinth;modpack;mods;launcher;
+MimeType=application/x-modrinth-modpack+zip;
+StartupWMClass=com.calcite.launcher

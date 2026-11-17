@@ -146,7 +146,13 @@ pub fn render(
                     accent_picker(cx).into_any_element(),
                     cx,
                 ))
-                .child(group("Behavior", None, behavior(cx), cx)),
+                .child(group("Behavior", None, behavior(cx), cx))
+                .child(group(
+                    "Instance tabs",
+                    Some("Hide the tabs you never use. Content is always there."),
+                    instance_tabs(cx),
+                    cx,
+                )),
         ),
         Section::Accounts => accounts(shell, cx),
         Section::Advanced => match shell.advanced_page() {
@@ -521,6 +527,24 @@ fn behavior(cx: &mut Context<Shell>) -> AnyElement {
             cx,
         ))
         .child(div().h(px(1.0)).bg(p.border))
+        .child(row(
+            "pref-notify",
+            "Notify me when I'm away",
+            "Desktop notifications for finished downloads and servers, only while Calcite is in the background.",
+            prefs.notify_when_away,
+            |p| p.notify_when_away = !p.notify_when_away,
+            cx,
+        ))
+        .child(div().h(px(1.0)).bg(p.border))
+        .child(row(
+            "pref-updates",
+            "Check for Calcite updates",
+            "Asks GitHub for the newest release when Calcite opens. Nothing about you is sent.",
+            prefs.check_updates,
+            |p| p.check_updates = !p.check_updates,
+            cx,
+        ))
+        .child(div().h(px(1.0)).bg(p.border))
         .child(
             div()
                 .flex()
@@ -545,6 +569,47 @@ fn behavior(cx: &mut Context<Shell>) -> AnyElement {
                 ),
         )
         .into_any_element()
+}
+
+/// One pill per optional instance tab; lit means shown.
+fn instance_tabs(cx: &mut Context<Shell>) -> AnyElement {
+    let p = cx.palette().clone();
+    let hidden = cx.global::<crate::prefs::Prefs>().hidden_tabs.clone();
+    let mut row = div().flex().flex_wrap().gap(space(1.5));
+    for label in crate::ui::pages::instance::OPTIONAL_TABS {
+        let shown = !hidden.iter().any(|h| h == label);
+        row = row.child(
+            div()
+                .id(SharedString::from(format!("tab-pref-{label}")))
+                .h(px(28.0))
+                .px(space(2.5))
+                .flex()
+                .items_center()
+                .gap(space(1.5))
+                .rounded(px(radius::SM))
+                .border_1()
+                .text_size(px(type_scale::SMALL))
+                .cursor_pointer()
+                .when(shown, |d| {
+                    d.border_color(p.accent)
+                        .bg(p.accent_soft)
+                        .text_color(p.text)
+                })
+                .when(!shown, |d| {
+                    d.border_color(p.border)
+                        .text_color(p.text_muted)
+                        .hover(|s| s.bg(p.hover))
+                })
+                .on_click(move |_, _, cx| crate::prefs::Prefs::set_tab_hidden(label, shown, cx))
+                .child(crate::ui::components::icon(
+                    if shown { "eye" } else { "eye-off" },
+                    13.0,
+                    if shown { p.accent_text } else { p.text_muted },
+                ))
+                .child(label),
+        );
+    }
+    row.into_any_element()
 }
 
 fn about(cx: &mut Context<Shell>) -> AnyElement {

@@ -112,7 +112,21 @@ impl Backend {
             theseus::EventState::init()
                 .await
                 .map_err(|e| anyhow!("{e}"))?;
-            theseus::State::init(id).await.map_err(|e| anyhow!("{e}"))?;
+            if let Some(dir) = data_dir() {
+                wait_for_store_lock(&dir, std::time::Duration::from_secs(10)).await;
+            }
+            theseus::State::init(id).await.map_err(|e| {
+                let text = e.to_string();
+                if text.contains("another Modrinth process") {
+                    anyhow!(
+                        "Another program is using this folder: most likely a Calcite that is \
+                         still closing, or the Modrinth App set to the same folder. Close it, \
+                         then try again."
+                    )
+                } else {
+                    anyhow!("{text}")
+                }
+            })?;
             // Calcite's promise: no telemetry, no ad personalisation.
             if let Ok(mut settings) = theseus::settings::get().await
                 && (settings.telemetry || settings.personalized_ads)
@@ -128,5 +142,32 @@ impl Backend {
 
     pub fn global(cx: &App) -> &Backend {
         cx.global::<Backend>()
+    }
+}
+
+/// The backend holds `store.lock` for as long as it runs and gives up at
+/// once if another process has it. A copy that is still closing lets go
+/// within a moment, so wait for that instead of failing.
+async fn wait_for_store_lock(dir: &std::path::Path, wait: std::time::Duration) {
+    let Ok(file) = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(dir.join("store.lock"))
+    else {
+        return;
+    };
+    let deadline = std::time::Instant::now() + wait;
+    loop {
+        match file.try_lock() {
+            Ok(()) => {
+                let _ = file.unlock();
+                return;
+            }
+            Err(std::fs::TryLockError::WouldBlock) if std::time::Instant::now() < deadline => {
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            }
+            Err(_) => return,
+        }
     }
 }

@@ -252,6 +252,8 @@ pub struct AppState {
     pub logs: HashMap<String, VecDeque<LogLine>>,
     /// A message for the user that hasn't been dismissed yet.
     pub notice: Option<Notice>,
+    /// A newer Calcite on GitHub, if the check found one.
+    pub update: Option<calcite_core::updates::Update>,
     /// Game folders to bring into an instance once its install job succeeds
     /// (official launcher imports), keyed by job id.
     pending_copies: HashMap<String, (PathBuf, Option<PathBuf>)>,
@@ -321,39 +323,9 @@ impl AppState {
         cx.global::<AppStateHandle>().0.clone()
     }
 
-    /// Create the state, start the backend, and pump its events.
-    pub fn start(
-        events: futures::channel::mpsc::UnboundedReceiver<AppEvent>,
-        cx: &mut App,
-    ) -> Entity<AppState> {
-        let state = cx.new(|_| AppState {
-            status: BackendStatus::Starting,
-            instances: Vec::new(),
-            groups: Vec::new(),
-            running: HashMap::new(),
-            jobs: Vec::new(),
-            accounts: Vec::new(),
-            face: None,
-            popular: None,
-            popular_loading: false,
-            default_account: None,
-            logs: HashMap::new(),
-            notice: None,
-            pending_copies: HashMap::new(),
-            pending_joins: HashMap::new(),
-            content_revision: HashMap::new(),
-            installing: HashMap::new(),
-            modrinth: None,
-            modrinth_signing_in: None,
-            friends: Vec::new(),
-            friends_task: None,
-            recent_worlds: Vec::new(),
-            refresh_task: None,
-        });
-        cx.set_global(AppStateHandle(state.clone()));
-
+    /// Start (or restart) the backend and move to Ready or Failed.
+    fn begin_init(weak: gpui_kit::WeakEntity<AppState>, cx: &mut App) {
         let init = Backend::global(cx).init_state();
-        let weak = state.downgrade();
         let started = std::time::Instant::now();
         cx.spawn(async move |cx| {
             let result = init.await;
@@ -379,6 +351,7 @@ impl AppState {
                         });
                     }
                     this.status = BackendStatus::Ready;
+                    this.check_for_update(cx);
                     this.refresh_all(cx);
                     this.refresh_modrinth(cx);
                     cx.notify();
@@ -394,6 +367,74 @@ impl AppState {
             }
         })
         .detach();
+    }
+
+    /// Ask GitHub for a newer release, unless the player turned that off.
+    pub fn check_for_update(&mut self, cx: &mut Context<Self>) {
+        if !cx.global::<crate::prefs::Prefs>().check_updates {
+            return;
+        }
+        let task = Backend::global(cx).run(async {
+            let http = reqwest::Client::builder()
+                .user_agent(concat!("calcite/", env!("CARGO_PKG_VERSION")))
+                .timeout(std::time::Duration::from_secs(15))
+                .build()?;
+            calcite_core::updates::check(&http, env!("CARGO_PKG_VERSION")).await
+        });
+        cx.spawn(async move |this, cx| match task.await.and_then(|r| r) {
+            Ok(update) => {
+                let _ = this.update(cx, |this, cx| {
+                    this.update = update;
+                    cx.notify();
+                });
+            }
+            Err(error) => tracing::debug!("update check failed: {error:#}"),
+        })
+        .detach();
+    }
+
+    /// Try opening the data folder again after it failed.
+    pub fn retry_start(&mut self, cx: &mut Context<Self>) {
+        if !matches!(self.status, BackendStatus::Failed(_)) {
+            return;
+        }
+        self.status = BackendStatus::Starting;
+        cx.notify();
+        Self::begin_init(cx.entity().downgrade(), cx);
+    }
+
+    /// Create the state, start the backend, and pump its events.
+    pub fn start(
+        events: futures::channel::mpsc::UnboundedReceiver<AppEvent>,
+        cx: &mut App,
+    ) -> Entity<AppState> {
+        let state = cx.new(|_| AppState {
+            status: BackendStatus::Starting,
+            instances: Vec::new(),
+            groups: Vec::new(),
+            running: HashMap::new(),
+            jobs: Vec::new(),
+            accounts: Vec::new(),
+            face: None,
+            popular: None,
+            popular_loading: false,
+            default_account: None,
+            logs: HashMap::new(),
+            notice: None,
+            update: None,
+            pending_copies: HashMap::new(),
+            pending_joins: HashMap::new(),
+            content_revision: HashMap::new(),
+            installing: HashMap::new(),
+            modrinth: None,
+            modrinth_signing_in: None,
+            friends: Vec::new(),
+            friends_task: None,
+            recent_worlds: Vec::new(),
+            refresh_task: None,
+        });
+        cx.set_global(AppStateHandle(state.clone()));
+        Self::begin_init(state.downgrade(), cx);
 
         let weak = state.downgrade();
         cx.spawn(async move |cx| {
@@ -512,6 +553,19 @@ impl AppState {
                         self.copy_game_folder(game_dir, mods_dir, instance_id, cx);
                     }
                     self.schedule_refresh(cx);
+                    if succeeded {
+                        crate::notify::send(
+                            format!("{} is ready", job.title),
+                            "Finished installing. Open Calcite to play.",
+                            cx,
+                        );
+                    } else if job.status == InstallJobStatus::Failed {
+                        crate::notify::send(
+                            format!("Couldn't finish {}", job.title),
+                            job.error.clone().unwrap_or_default(),
+                            cx,
+                        );
+                    }
                     if let Some(error) = job.error.clone().filter(|_| !succeeded) {
                         self.notice = Some(Notice {
                             title: format!("Couldn't finish \u{201c}{}\u{201d}", job.title).into(),

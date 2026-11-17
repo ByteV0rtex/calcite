@@ -25,4 +25,19 @@ fn main() {
         "cargo::rustc-env=CALCITE_BACKEND_VERSION={}",
         backend.trim()
     );
+
+    // The icon Explorer, the taskbar and the installer show for calcite.exe.
+    #[cfg(windows)]
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
+        let icon = "../../packaging/icons/calcite.ico";
+        println!("cargo::rerun-if-changed={icon}");
+        let mut resource = winresource::WindowsResource::new();
+        resource
+            .set_icon(icon)
+            .set("ProductName", "Calcite")
+            .set("FileDescription", "Calcite");
+        if let Err(error) = resource.compile() {
+            println!("cargo::warning=couldn't embed the Windows icon: {error}");
+        }
+    }
 }

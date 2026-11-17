@@ -1,12 +1,16 @@
 //! Calcite: a fast, native Minecraft launcher.
 #![recursion_limit = "512"]
+// No console window behind the app on Windows (debug builds keep it for logs).
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod assets;
 mod backend;
 mod cli;
+mod hosting;
 mod images;
 mod login;
 mod modrinth_login;
+mod notify;
 mod prefs;
 mod shortcuts;
 mod single;
@@ -26,19 +30,18 @@ use crate::ui::pages::discover::Api;
 use crate::ui::shell::{Route, Shell};
 
 fn main() {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "calcite=info,theseus=warn".into()),
-        )
-        .init();
-
+    portable_mode();
     let args: Vec<String> = std::env::args().skip(1).collect();
 
     // Command-line mode: `calcite list`, `calcite create …`, `calcite play …`.
-    if let Some(code) = cli::run(&args) {
-        std::process::exit(code);
+    if cli::is_command(&args) {
+        attach_console();
+        init_logging(false);
+        if let Some(code) = cli::run(&args) {
+            std::process::exit(code);
+        }
     }
+    init_logging(!args.iter().any(|a| a == "--snapshot"));
 
     // `--snapshot <page> <out.png> [light|oled]` (dev builds with the `snapshot` feature).
     let snapshot = match args.first().map(String::as_str) {
@@ -105,166 +108,189 @@ fn main() {
         }
     };
 
-    gpui_kit::application()
-        .with_assets(assets::Assets)
-        .run(move |cx: &mut App| {
-            gpui_kit::init(cx);
-            if let Err(error) = assets::load_fonts(cx) {
-                tracing::warn!("bundled fonts failed to load: {error:#}");
-            }
-            let mut saved = prefs::Prefs::load();
-            match snapshot.as_ref().map(|s| s.2.as_str()) {
-                Some("light") => saved.appearance = Appearance::Light,
-                Some("oled") => saved.appearance = Appearance::Oled,
-                Some(_) => saved.appearance = Appearance::Dark,
-                None => {}
-            }
-            if snapshot
-                .as_ref()
-                .is_some_and(|s| s.0.starts_with("onboarding"))
-            {
-                saved.onboarding_done = false;
-            } else if snapshot.is_some() {
-                saved.onboarding_done = true;
-            }
-            if snapshot.is_some() {
-                // Snapshots pick their look explicitly.
-                saved.follow_system = false;
-            }
-            cx.set_global(saved);
-            prefs::Prefs::apply_current(cx);
+    // Files opened from Finder (double-clicking a .mrpack, or dropping one
+    // on the Dock icon) arrive as URLs, sometimes before the window exists.
+    let (opened_tx, mut opened_rx) = futures::channel::mpsc::unbounded::<Vec<String>>();
+    let application = gpui_kit::application().with_assets(assets::Assets);
+    application.on_open_urls(move |urls| {
+        let _ = opened_tx.unbounded_send(urls);
+    });
+    application.run(move |cx: &mut App| {
+        gpui_kit::init(cx);
+        if let Err(error) = assets::load_fonts(cx) {
+            tracing::warn!("bundled fonts failed to load: {error:#}");
+        }
+        let mut saved = prefs::Prefs::load();
+        match snapshot.as_ref().map(|s| s.2.as_str()) {
+            Some("light") => saved.appearance = Appearance::Light,
+            Some("oled") => saved.appearance = Appearance::Oled,
+            Some(_) => saved.appearance = Appearance::Dark,
+            None => {}
+        }
+        if snapshot
+            .as_ref()
+            .is_some_and(|s| s.0.starts_with("onboarding"))
+        {
+            saved.onboarding_done = false;
+        } else if snapshot.is_some() {
+            saved.onboarding_done = true;
+        }
+        if snapshot.is_some() {
+            // Snapshots pick their look explicitly.
+            saved.follow_system = false;
+        }
+        cx.set_global(saved);
+        prefs::Prefs::apply_current(cx);
 
-            let api = calcite_core::modrinth::Client::new(&calcite_core::user_agent())
-                .expect("HTTP client");
-            images::Images::init(api.clone(), cx);
-            cx.set_global(Api(api));
-            cx.set_global(backend.clone());
-            AppState::start(events, cx);
-            // A skin change waits a moment before it's sent; send it now if
-            // Calcite is closing.
-            cx.on_app_quit(|cx| {
-                let flush = Backend::global(cx)
-                    .call(async { theseus::minecraft_skins::flush_pending_skin_change().await });
-                async move {
-                    let _ = flush.await;
+        let api =
+            calcite_core::modrinth::Client::new(&calcite_core::user_agent()).expect("HTTP client");
+        images::Images::init(api.clone(), cx);
+        cx.set_global(Api(api));
+        cx.set_global(backend.clone());
+        AppState::start(events, cx);
+        hosting::Hosting::init(cx);
+        // A skin change waits a moment before it's sent; send it now if
+        // Calcite is closing.
+        cx.on_app_quit(|cx| {
+            let flush = Backend::global(cx)
+                .call(async { theseus::minecraft_skins::flush_pending_skin_change().await });
+            async move {
+                let _ = flush.await;
+            }
+        })
+        .detach();
+
+        let bounds = Bounds::centered(None, size(px(1280.0), px(820.0)), cx);
+        let options = WindowOptions {
+            window_bounds: Some(WindowBounds::Windowed(bounds)),
+            window_min_size: Some(size(px(960.0), px(600.0))),
+            app_id: Some("com.calcite.launcher".into()),
+            titlebar: Some(gpui_kit::TitlebarOptions {
+                // Centre the traffic lights on Calcite's 40px title bar.
+                traffic_light_position: Some(gpui_kit::point(px(13.0), px(13.0))),
+                ..TitleBar::title_bar_options()
+            }),
+            ..TitleBar::window_options()
+        };
+        let window = cx
+            .open_window(options, |window, cx| {
+                window.set_window_title("Calcite");
+                // Follow the system's light and dark when asked to.
+                window
+                    .observe_window_appearance(|_, cx| {
+                        if cx.global::<prefs::Prefs>().follow_system {
+                            prefs::Prefs::apply_current(cx);
+                            cx.refresh_windows();
+                        }
+                    })
+                    .detach();
+                let start = match page_arg.as_str() {
+                    "gallery" => Route::Gallery,
+                    "library" => Route::Library,
+                    "discover" => Route::Discover,
+                    "move-in" => Route::Settings(ui::pages::settings::Section::MoveIn),
+                    "settings" => Route::Settings(ui::pages::settings::Section::Appearance),
+                    "accounts" => Route::Settings(ui::pages::settings::Section::Accounts),
+                    "game-settings" => Route::Settings(ui::pages::settings::Section::Game),
+                    "storage" => Route::Settings(ui::pages::settings::Section::Storage),
+                    "about" => Route::Settings(ui::pages::settings::Section::About),
+                    "advanced" => Route::Settings(ui::pages::settings::Section::Advanced),
+                    "skins" => Route::Skins,
+                    "screenshots" => Route::Screenshots,
+                    "hosting" => Route::Hosting,
+                    "user" => Route::User(
+                        std::env::var("CALCITE_SNAPSHOT_USER")
+                            .unwrap_or_else(|_| "jellysquid3".into()),
+                    ),
+                    "home" => Route::Home,
+                    _ => match cx.global::<prefs::Prefs>().start_page {
+                        prefs::StartPage::Home => Route::Home,
+                        prefs::StartPage::Library => Route::Library,
+                    },
+                };
+                let shell = cx.new(|cx| Shell::new(start, window, cx));
+                cx.new(|cx| Root::new(shell, window, cx))
+            })
+            .expect("open the main window");
+        cx.activate(true);
+
+        // ⌘K / Ctrl+K opens the command palette from anywhere.
+        cx.bind_keys([gpui_kit::KeyBinding::new(
+            if cfg!(target_os = "macos") {
+                "cmd-k"
+            } else {
+                "ctrl-k"
+            },
+            ui::shell::TogglePalette,
+            None,
+        )]);
+        // Later launches: come to the front, and open what they were given.
+        let with_shell = move |cx: &mut App,
+                               f: &dyn Fn(
+            &mut Shell,
+            &mut gpui_kit::Window,
+            &mut gpui_kit::Context<Shell>,
+        )| {
+            let _ = window.update(cx, |root, window, cx| {
+                window.activate_window();
+                if let Ok(shell) = root.view().clone().downcast::<Shell>() {
+                    shell.update(cx, |s, cx| f(s, window, cx));
+                }
+            });
+        };
+        if !opened.is_empty() {
+            let paths = opened.clone();
+            with_shell(cx, &move |s, window, cx| {
+                s.handle_drop(paths.clone(), window, cx)
+            });
+        }
+        cx.spawn(async move |cx| {
+            use futures::StreamExt as _;
+            while let Some(urls) = opened_rx.next().await {
+                let paths = file_paths(&urls);
+                if paths.is_empty() {
+                    continue;
+                }
+                cx.update(|cx| {
+                    cx.activate(true);
+                    with_shell(cx, &move |s, window, cx| {
+                        s.handle_drop(paths.clone(), window, cx)
+                    })
+                });
+            }
+        })
+        .detach();
+        if let Some(mut requests) = requests {
+            cx.spawn(async move |cx| {
+                use futures::StreamExt as _;
+                while let Some(request) = requests.next().await {
+                    cx.update(|cx| {
+                        cx.activate(true);
+                        match request {
+                            single::Request::Focus => with_shell(cx, &|_, _, _| {}),
+                            single::Request::Open(paths) => {
+                                with_shell(cx, &move |s, window, cx| {
+                                    s.handle_drop(paths.clone(), window, cx)
+                                })
+                            }
+                        }
+                    });
                 }
             })
             .detach();
-
-            let bounds = Bounds::centered(None, size(px(1280.0), px(820.0)), cx);
-            let options = WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
-                window_min_size: Some(size(px(960.0), px(600.0))),
-                app_id: Some("com.calcite.launcher".into()),
-                titlebar: Some(gpui_kit::TitlebarOptions {
-                    // Centre the traffic lights on Calcite's 40px title bar.
-                    traffic_light_position: Some(gpui_kit::point(px(13.0), px(13.0))),
-                    ..TitleBar::title_bar_options()
-                }),
-                ..TitleBar::window_options()
-            };
-            let window = cx
-                .open_window(options, |window, cx| {
-                    window.set_window_title("Calcite");
-                    // Follow the system's light and dark when asked to.
-                    window
-                        .observe_window_appearance(|_, cx| {
-                            if cx.global::<prefs::Prefs>().follow_system {
-                                prefs::Prefs::apply_current(cx);
-                                cx.refresh_windows();
-                            }
-                        })
-                        .detach();
-                    let start = match page_arg.as_str() {
-                        "gallery" => Route::Gallery,
-                        "library" => Route::Library,
-                        "discover" => Route::Discover,
-                        "move-in" => Route::Settings(ui::pages::settings::Section::MoveIn),
-                        "settings" => Route::Settings(ui::pages::settings::Section::Appearance),
-                        "accounts" => Route::Settings(ui::pages::settings::Section::Accounts),
-                        "game-settings" => Route::Settings(ui::pages::settings::Section::Game),
-                        "storage" => Route::Settings(ui::pages::settings::Section::Storage),
-                        "about" => Route::Settings(ui::pages::settings::Section::About),
-                        "advanced" => Route::Settings(ui::pages::settings::Section::Advanced),
-                        "skins" => Route::Skins,
-                        "screenshots" => Route::Screenshots,
-                        "user" => Route::User(
-                            std::env::var("CALCITE_SNAPSHOT_USER")
-                                .unwrap_or_else(|_| "jellysquid3".into()),
-                        ),
-                        "home" => Route::Home,
-                        _ => match cx.global::<prefs::Prefs>().start_page {
-                            prefs::StartPage::Home => Route::Home,
-                            prefs::StartPage::Library => Route::Library,
-                        },
-                    };
-                    let shell = cx.new(|cx| Shell::new(start, window, cx));
-                    cx.new(|cx| Root::new(shell, window, cx))
-                })
-                .expect("open the main window");
-            cx.activate(true);
-
-            // ⌘K / Ctrl+K opens the command palette from anywhere.
-            cx.bind_keys([gpui_kit::KeyBinding::new(
-                if cfg!(target_os = "macos") {
-                    "cmd-k"
-                } else {
-                    "ctrl-k"
-                },
-                ui::shell::TogglePalette,
-                None,
-            )]);
-            // Later launches: come to the front, and open what they were given.
-            let with_shell = move |cx: &mut App,
-                                   f: &dyn Fn(
-                &mut Shell,
-                &mut gpui_kit::Window,
-                &mut gpui_kit::Context<Shell>,
-            )| {
-                let _ = window.update(cx, |root, window, cx| {
-                    window.activate_window();
-                    if let Ok(shell) = root.view().clone().downcast::<Shell>() {
-                        shell.update(cx, |s, cx| f(s, window, cx));
-                    }
-                });
-            };
-            if !opened.is_empty() {
-                let paths = opened.clone();
-                with_shell(cx, &move |s, window, cx| {
-                    s.handle_drop(paths.clone(), window, cx)
-                });
-            }
-            if let Some(mut requests) = requests {
-                cx.spawn(async move |cx| {
-                    use futures::StreamExt as _;
-                    while let Some(request) = requests.next().await {
-                        cx.update(|cx| {
-                            cx.activate(true);
-                            match request {
-                                single::Request::Focus => with_shell(cx, &|_, _, _| {}),
-                                single::Request::Open(paths) => {
-                                    with_shell(cx, &move |s, window, cx| {
-                                        s.handle_drop(paths.clone(), window, cx)
-                                    })
-                                }
-                            }
-                        });
-                    }
-                })
-                .detach();
-            }
-            cx.on_action(move |_: &ui::shell::TogglePalette, cx| {
-                let _ = window.update(cx, |root, window, cx| {
-                    if let Ok(shell) = root.view().clone().downcast::<Shell>() {
-                        shell.update(cx, |s, cx| s.toggle_palette(window, cx));
-                    }
-                });
+        }
+        cx.on_action(move |_: &ui::shell::TogglePalette, cx| {
+            let _ = window.update(cx, |root, window, cx| {
+                if let Ok(shell) = root.view().clone().downcast::<Shell>() {
+                    shell.update(cx, |s, cx| s.toggle_palette(window, cx));
+                }
             });
-
-            if let Some((page, out, _)) = snapshot.clone() {
-                take_snapshot(window.into(), page, out, cx);
-            }
         });
+
+        if let Some((page, out, _)) = snapshot.clone() {
+            take_snapshot(window.into(), page, out, cx);
+        }
+    });
 }
 
 /// Wait for data and images to arrive, render the window offscreen, save it.
@@ -499,4 +525,90 @@ fn take_snapshot(window: gpui_kit::AnyWindowHandle, page: String, out: String, c
 #[cfg(not(feature = "snapshot"))]
 fn take_snapshot(_window: gpui_kit::AnyWindowHandle, _page: String, _out: String, _cx: &mut App) {
     eprintln!("This build can't take snapshots; rebuild with `--features snapshot`.");
+}
+
+/// Portable mode: with a `portable.txt` next to the program, everything
+/// Calcite keeps (instances, accounts, settings) lives in a `data` folder
+/// beside it, so it can run from a USB stick and leave nothing behind.
+fn portable_mode() {
+    if std::env::var_os("THESEUS_CONFIG_DIR").is_some() {
+        return;
+    }
+    let Some(dir) = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|p| p.to_path_buf()))
+    else {
+        return;
+    };
+    if dir.join("portable.txt").is_file() {
+        // SAFETY: first thing in main, before any other thread exists.
+        unsafe { std::env::set_var("THESEUS_CONFIG_DIR", dir.join("data")) };
+    }
+}
+
+/// Log to stderr, and for the app itself also to `calcite.log` in the data
+/// folder (the run before is kept as `calcite.previous.log`), so a problem
+/// can be looked at after the fact even when nothing was watching stderr.
+fn init_logging(to_file: bool) {
+    use tracing_subscriber::layer::SubscriberExt as _;
+    use tracing_subscriber::util::SubscriberInitExt as _;
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| "calcite=info,theseus=warn".into());
+    let file = to_file.then(backend::data_dir).flatten().and_then(|dir| {
+        std::fs::create_dir_all(&dir).ok()?;
+        let log = dir.join("calcite.log");
+        let _ = std::fs::rename(&log, dir.join("calcite.previous.log"));
+        std::fs::File::create(log).ok()
+    });
+    let _ = tracing_subscriber::registry()
+        .with(filter)
+        .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
+        .with(file.map(|file| {
+            tracing_subscriber::fmt::layer()
+                .with_ansi(false)
+                .with_writer(std::sync::Mutex::new(file))
+        }))
+        .try_init();
+}
+
+/// Windows release builds have no console of their own; borrow the one the
+/// command was typed into so `calcite list` prints there.
+fn attach_console() {
+    #[cfg(all(windows, not(debug_assertions)))]
+    // SAFETY: a plain Win32 call with a constant argument.
+    unsafe {
+        windows_sys::Win32::System::Console::AttachConsole(
+            windows_sys::Win32::System::Console::ATTACH_PARENT_PROCESS,
+        );
+    }
+}
+
+/// Local paths out of the `file://` URLs the system opens Calcite with.
+fn file_paths(urls: &[String]) -> Vec<std::path::PathBuf> {
+    urls.iter()
+        .filter_map(|u| url::Url::parse(u).ok())
+        .filter(|u| u.scheme() == "file")
+        .filter_map(|u| u.to_file_path().ok())
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[cfg(unix)]
+    fn file_urls_become_paths_and_others_are_ignored() {
+        let paths = file_paths(&[
+            "file:///Users/me/Downloads/My%20Pack.mrpack".into(),
+            "https://modrinth.com".into(),
+            "not a url".into(),
+        ]);
+        assert_eq!(
+            paths,
+            vec![std::path::PathBuf::from(
+                "/Users/me/Downloads/My Pack.mrpack"
+            )]
+        );
+    }
 }

@@ -45,6 +45,8 @@ pub enum Route {
     Settings(SettingsSection),
     Skins,
     Screenshots,
+    /// Servers running on this computer.
+    Hosting,
     /// A Modrinth user's page.
     User(String),
     Gallery,
@@ -153,6 +155,8 @@ pub struct Shell {
     advanced: Option<Entity<crate::ui::pages::advanced::AdvancedSettings>>,
     /// Re-read each time it's opened.
     screenshots: Option<Entity<crate::ui::pages::screenshots::ScreenshotsPage>>,
+    /// Kept while Calcite runs, so the open console stays put.
+    hosting: Option<Entity<crate::ui::pages::hosting::HostingPage>>,
     /// Only alive while Skins is open (it holds rendered thumbnails).
     skins: Option<Entity<crate::ui::pages::skins::SkinsPage>>,
     dialog: Option<gpui_kit::AnyView>,
@@ -235,6 +239,7 @@ impl Shell {
             advanced: None,
             skins: None,
             screenshots: None,
+            hosting: None,
             dialog: None,
             palette: None,
             overlay_seq: 0,
@@ -372,6 +377,9 @@ impl Shell {
                 .detach();
                 self.user_page = Some(page);
             }
+        }
+        if route == Route::Hosting && self.hosting.is_none() {
+            self.hosting = Some(cx.new(crate::ui::pages::hosting::HostingPage::new));
         }
         if route == Route::Screenshots && self.route != route {
             self.screenshots = Some(cx.new(crate::ui::pages::screenshots::ScreenshotsPage::new));
@@ -1158,6 +1166,14 @@ impl Shell {
                         Route::Screenshots,
                         route == Route::Screenshots,
                         cx,
+                    ))
+                    .child(nav_item(
+                        "nav-hosting",
+                        "server",
+                        "Hosting",
+                        Route::Hosting,
+                        route == Route::Hosting,
+                        cx,
                     )),
             )
             .when(!instances.is_empty(), |d| {
@@ -1182,9 +1198,46 @@ impl Shell {
             })
             .children(crate::ui::friends::sidebar_section(self, cx))
             .child(div().flex_1())
+            .children(self.update_card(cx))
             .children(self.download_card(cx))
             .when(self.account_menu_open, |d| d.child(self.account_menu(cx)))
             .child(self.account_row(cx))
+    }
+
+    fn update_card(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        let update = self.state.read(cx).update.clone()?;
+        let p = cx.palette().clone();
+        let url = update.url.clone();
+        Some(
+            div()
+                .id("update-card")
+                .mx(space(2.0))
+                .mb(space(2.0))
+                .p(space(2.5))
+                .rounded(px(radius::MD))
+                .bg(p.accent_soft)
+                .flex()
+                .items_center()
+                .gap(space(2.0))
+                .cursor_pointer()
+                .on_click(move |_, _, cx| cx.open_url(&url))
+                .child(icon("arrow-up", 14.0, p.accent_text))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .text_size(px(type_scale::SMALL))
+                        .text_color(p.text)
+                        .child(format!("Calcite {} is out", update.version)),
+                )
+                .child(
+                    div()
+                        .text_size(px(type_scale::CAPTION))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(p.accent_text)
+                        .child("Get it"),
+                ),
+        )
     }
 
     fn download_card(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
@@ -1641,11 +1694,21 @@ impl Shell {
                     .into_any_element();
             }
             BackendStatus::Failed(error) => {
+                let state = self.state.clone();
                 return empty_state(
                     "circle-alert",
                     "Calcite couldn't open its data folder",
                     error,
-                    None,
+                    Some(
+                        Button::new("retry-backend")
+                            .icon("refresh-cw")
+                            .label("Try again")
+                            .primary()
+                            .on_click(move |_, _, cx| {
+                                state.update(cx, |state, cx| state.retry_start(cx))
+                            })
+                            .into_any_element(),
+                    ),
                     cx,
                 )
                 .size_full()
@@ -1676,6 +1739,10 @@ impl Shell {
                 None => div().into_any_element(),
             },
             Route::Screenshots => match &self.screenshots {
+                Some(page) => page.clone().into_any_element(),
+                None => div().into_any_element(),
+            },
+            Route::Hosting => match &self.hosting {
                 Some(page) => page.clone().into_any_element(),
                 None => div().into_any_element(),
             },

@@ -22,6 +22,12 @@ pub struct Prefs {
     pub minimize_on_launch: bool,
     pub refocus_on_exit: bool,
     pub start_page: StartPage,
+    /// Look for a newer Calcite on GitHub at startup.
+    pub check_updates: bool,
+    /// Desktop notifications when Calcite is in the background.
+    pub notify_when_away: bool,
+    /// Instance tabs the player hid (by label).
+    pub hidden_tabs: Vec<String>,
 }
 
 /// The page Calcite opens on.
@@ -45,6 +51,9 @@ impl Default for Prefs {
             minimize_on_launch: false,
             refocus_on_exit: true,
             start_page: StartPage::Home,
+            check_updates: true,
+            notify_when_away: false,
+            hidden_tabs: Vec::new(),
         }
     }
 }
@@ -137,6 +146,17 @@ impl Prefs {
         prefs.save();
     }
 
+    /// Show or hide an instance tab.
+    pub fn set_tab_hidden(label: &str, hidden: bool, cx: &mut gpui_kit::App) {
+        let prefs = cx.global_mut::<Prefs>();
+        prefs.hidden_tabs.retain(|t| t != label);
+        if hidden {
+            prefs.hidden_tabs.push(label.to_string());
+        }
+        prefs.save();
+        cx.refresh_windows();
+    }
+
     pub fn finish_onboarding(cx: &mut gpui_kit::App) {
         let prefs = cx.global_mut::<Prefs>();
         prefs.onboarding_done = true;
@@ -161,6 +181,9 @@ mod tests {
             minimize_on_launch: true,
             refocus_on_exit: false,
             start_page: StartPage::Library,
+            check_updates: false,
+            notify_when_away: true,
+            hidden_tabs: vec!["Snapshots".into()],
         };
         let json = serde_json::to_string(&prefs).unwrap();
         assert_eq!(serde_json::from_str::<Prefs>(&json).unwrap(), prefs);
@@ -169,5 +192,7 @@ mod tests {
         assert_eq!(old.accent, Accent::Teal);
         assert!(!old.onboarding_done);
         assert!(old.backup_worlds_on_exit, "backups default to on");
+        assert!(old.check_updates, "update checks default to on");
+        assert!(!old.notify_when_away, "notifications are opt-in");
     }
 }

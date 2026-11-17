@@ -15,24 +15,21 @@ use theseus::install::InstallJobStatus;
 use crate::backend::Backend;
 use crate::state::{loader_name, parse_legacy_line};
 
+const COMMANDS: [&str; 10] = [
+    "list", "create", "play", "add", "content", "health", "doctor", "move-in", "help", "--help",
+];
+
+/// Whether `args` is a command rather than files to open in the app.
+pub fn is_command(args: &[String]) -> bool {
+    args.first().is_some_and(|a| COMMANDS.contains(&a.as_str()))
+}
+
 /// Returns `Some(exit code)` if `args` was a command, `None` to open the app.
 pub fn run(args: &[String]) -> Option<i32> {
-    let command = args.first()?.as_str();
-    if !matches!(
-        command,
-        "list"
-            | "create"
-            | "play"
-            | "add"
-            | "content"
-            | "health"
-            | "doctor"
-            | "move-in"
-            | "help"
-            | "--help"
-    ) {
+    if !is_command(args) {
         return None;
     }
+    let command = args.first()?.as_str();
     if matches!(command, "help" | "--help") {
         println!(
             "calcite list\ncalcite create <name> <vanilla|fabric|quilt|forge|neoforge> <game-version> [loader-version]\ncalcite play <name-or-id>"

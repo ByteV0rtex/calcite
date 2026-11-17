@@ -25,6 +25,9 @@ jobs:
   build:
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
+    # Only used to attach installers to a draft release on version tags.
+    permissions:
+      contents: write
     strategy:
       fail-fast: false
       matrix:
@@ -89,17 +92,47 @@ jobs:
       - name: Test
         run: cargo test --workspace
 
-      # Optimized builds only when asked for (Run workflow → release) or for
-      # a version tag; nobody needs one on every push.
+      # Optimized builds and installers only when asked for (Run workflow →
+      # release) or for a version tag; nobody needs one on every push.
       - name: Release build
         if: (github.event_name == 'workflow_dispatch' && inputs.release) || startsWith(github.ref, 'refs/tags/')
         run: cargo build --release -p calcite
+
+      - name: Package (macOS .app and .dmg)
+        if: runner.os == 'macOS' && ((github.event_name == 'workflow_dispatch' && inputs.release) || startsWith(github.ref, 'refs/tags/'))
+        run: SKIP_BUILD=1 scripts/package-macos.sh
+
+      - name: Package (Linux .deb and AppImage)
+        if: runner.os == 'Linux' && ((github.event_name == 'workflow_dispatch' && inputs.release) || startsWith(github.ref, 'refs/tags/'))
+        run: |
+          sudo apt-get install -y --no-install-recommends desktop-file-utils
+          desktop-file-validate packaging/linux/com.calcite.launcher.desktop
+          curl -fsSL -o "$RUNNER_TEMP/appimagetool" \
+            https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
+          chmod +x "$RUNNER_TEMP/appimagetool"
+          SKIP_BUILD=1 APPIMAGETOOL="$RUNNER_TEMP/appimagetool" scripts/package-linux.sh
+
+      - name: Package (Windows installer and portable .zip)
+        if: runner.os == 'Windows' && ((github.event_name == 'workflow_dispatch' && inputs.release) || startsWith(github.ref, 'refs/tags/'))
+        shell: pwsh
+        run: scripts/package-windows.ps1 -SkipBuild
 
       - uses: actions/upload-artifact@v4
         if: (github.event_name == 'workflow_dispatch' && inputs.release) || startsWith(github.ref, 'refs/tags/')
         with:
           name: calcite-${{ runner.os }}
-          path: |
-            ${{ env.CARGO_TARGET_DIR || 'target' }}/release/calcite
-            ${{ env.CARGO_TARGET_DIR || 'target' }}/release/calcite.exe
+          path: dist/
           if-no-files-found: error
+
+      # A version tag also gets a draft GitHub release with every installer,
+      # to check and publish by hand.
+      - name: Attach to the draft release
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 \
+            || gh release create "$GITHUB_REF_NAME" --draft --generate-notes --title "Calcite ${GITHUB_REF_NAME#v}" \
+            || true
+          find dist -maxdepth 1 -type f -print0 | xargs -0 gh release upload "$GITHUB_REF_NAME" --clobber

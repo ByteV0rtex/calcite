@@ -117,6 +117,7 @@ impl CommandPalette {
             page("compass", "Discover", Route::Discover),
             page("shirt", "Skins", Route::Skins),
             page("image", "Screenshots", Route::Screenshots),
+            page("server", "Hosting", Route::Hosting),
             page(
                 "sun",
                 "Settings · Appearance",

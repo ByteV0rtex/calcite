@@ -9,6 +9,7 @@ pub mod dropped;
 pub mod fuzzy;
 pub mod health;
 pub mod launchers;
+pub mod local_server;
 pub mod markup;
 pub mod modrinth;
 pub mod modrinth_auth;
@@ -20,6 +21,7 @@ pub mod skin3d;
 pub mod snapshots;
 pub mod storage;
 pub mod transfer;
+pub mod updates;
 
 /// Calcite's version, as reported to services and shown in the app.
 pub fn version() -> &'static str {
