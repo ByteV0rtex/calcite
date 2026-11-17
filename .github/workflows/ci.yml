@@ -99,7 +99,7 @@ jobs:
         env:
           # Turns on CurseForge; unset (forks, pull requests) just leaves it off.
           CALCITE_CURSEFORGE_KEY: ${{ secrets.CALCITE_CURSEFORGE_KEY }}
-        run: cargo build --release -p calcite
+        run: cargo build --release -p calcite -p calcite-login
 
       - name: Package (macOS .app and .dmg)
         if: runner.os == 'macOS' && ((github.event_name == 'workflow_dispatch' && inputs.release) || startsWith(github.ref, 'refs/tags/'))
@@ -119,6 +119,77 @@ jobs:
         if: runner.os == 'Windows' && ((github.event_name == 'workflow_dispatch' && inputs.release) || startsWith(github.ref, 'refs/tags/'))
         shell: pwsh
         run: scripts/package-windows.ps1 -SkipBuild
+
+      # Install each package the way a player would, start Calcite, and check
+      # it stays up and opens its data folder. Catches missing files and
+      # missing libraries, not just build errors.
+      - name: Try the installers (macOS)
+        if: runner.os == 'macOS' && ((github.event_name == 'workflow_dispatch' && inputs.release) || startsWith(github.ref, 'refs/tags/'))
+        run: |
+          mnt=$(mktemp -d)
+          hdiutil attach -nobrowse -readonly -mountpoint "$mnt" dist/Calcite-*.dmg
+          ditto "$mnt/Calcite.app" "$HOME/Applications/Calcite.app"
+          hdiutil detach "$mnt"
+          app="$HOME/Applications/Calcite.app/Contents/MacOS"
+          test -x "$app/calcite-login"
+          "$app/calcite" help
+          CALCITE_DATA_ID=CalciteCI "$app/calcite" &
+          pid=$!
+          sleep 25
+          kill -0 $pid
+          grep -E "backend init finished .*: ok" "$HOME/Library/Application Support/CalciteCI/calcite.log"
+          kill $pid
+
+      - name: Try the installers (Linux, in a clean Ubuntu)
+        if: runner.os == 'Linux' && ((github.event_name == 'workflow_dispatch' && inputs.release) || startsWith(github.ref, 'refs/tags/'))
+        run: |
+          # A fresh container has only what the .deb pulls in, so a missing
+          # dependency shows up here instead of on a player's computer.
+          docker run --rm -v "$PWD/dist:/dist:ro" ubuntu:24.04 bash -euxc '
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get update -qq
+            apt-get install -y -qq /dist/calcite_*.deb xvfb xauth mesa-vulkan-drivers procps >/dev/null
+            for bin in /usr/bin/calcite /usr/bin/calcite-login; do
+              if ldd "$bin" | grep "not found"; then exit 1; fi
+            done
+            calcite help
+            export CALCITE_DATA_ID=CalciteCI
+            xvfb-run -a calcite > /tmp/gui.log 2>&1 &
+            sleep 25
+            pgrep -x calcite || { cat /tmp/gui.log; exit 1; }
+            grep -E "backend init finished .*: ok" ~/.local/share/CalciteCI/calcite.log
+          '
+          chmod +x dist/*.AppImage
+          APPIMAGE_EXTRACT_AND_RUN=1 ./dist/Calcite-*.AppImage help
+
+      - name: Try the installers (Windows setup and portable)
+        if: runner.os == 'Windows' && ((github.event_name == 'workflow_dispatch' && inputs.release) || startsWith(github.ref, 'refs/tags/'))
+        shell: pwsh
+        run: |
+          $setup = (Get-ChildItem dist\*-setup.exe)[0].FullName
+          Start-Process $setup -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/CURRENTUSER' -Wait
+          $dir = Join-Path $env:LOCALAPPDATA 'Programs\Calcite'
+          if (-not (Test-Path "$dir\calcite-login.exe")) { throw "not installed in $dir" }
+          $help = Start-Process "$dir\calcite.exe" -ArgumentList 'help' -Wait -PassThru
+          if ($help.ExitCode -ne 0) { throw "calcite help exited with $($help.ExitCode)" }
+          $env:CALCITE_DATA_ID = 'CalciteCI'
+          $app = Start-Process "$dir\calcite.exe" -PassThru
+          Start-Sleep 25
+          if ($app.HasExited) { throw "Calcite quit by itself (exit $($app.ExitCode))" }
+          $log = Join-Path $env:APPDATA 'CalciteCI\calcite.log'
+          Get-Content $log
+          if (-not (Select-String -Path $log -Pattern 'backend init finished .*: ok' -Quiet)) { throw 'the data folder did not open' }
+          Stop-Process -Id $app.Id
+          Remove-Item Env:\CALCITE_DATA_ID
+
+          # Portable: everything stays next to calcite.exe.
+          $portable = Join-Path $env:RUNNER_TEMP 'portable'
+          Expand-Archive (Get-ChildItem dist\*-portable.zip)[0].FullName -DestinationPath $portable
+          $app = Start-Process "$portable\calcite.exe" -PassThru
+          Start-Sleep 25
+          if ($app.HasExited) { throw "portable Calcite quit by itself (exit $($app.ExitCode))" }
+          if (-not (Test-Path "$portable\data\calcite.log")) { throw 'portable mode did not keep its data next to calcite.exe' }
+          Stop-Process -Id $app.Id
 
       - uses: actions/upload-artifact@v4
         if: (github.event_name == 'workflow_dispatch' && inputs.release) || startsWith(github.ref, 'refs/tags/')

@@ -26,7 +26,8 @@ if [[ -z "${CALCITE_CURSEFORGE_KEY:-}" && -f .curseforge-key ]]; then
 fi
 
 if [[ -z "${SKIP_BUILD:-}" ]]; then
-  cargo build --release -p calcite
+  # The app and its sign-in helper (Microsoft's page in a web view).
+  cargo build --release -p calcite -p calcite-login
 fi
 mkdir -p "$DIST"
 WORK=$(mktemp -d)
@@ -36,6 +37,8 @@ trap 'rm -rf "$WORK"' EXIT
 install_tree() {
   local root=$1
   install -Dm755 "${CALCITE_BIN:-$TARGET/release/calcite}" "$root/usr/bin/calcite"
+  # Calcite looks for the sign-in helper next to itself.
+  install -Dm755 "${CALCITE_LOGIN_BIN:-$TARGET/release/calcite-login}" "$root/usr/bin/calcite-login"
   install -Dm644 "packaging/linux/$ID.desktop" "$root/usr/share/applications/$ID.desktop"
   install -Dm644 packaging/linux/calcite-mrpack.xml "$root/usr/share/mime/packages/$ID.xml"
   install -Dm644 packaging/icons/calcite-256.png "$root/usr/share/icons/hicolor/256x256/apps/$ID.png"
@@ -53,7 +56,7 @@ Version: $VERSION
 Section: games
 Priority: optional
 Architecture: $DEB_ARCH
-Depends: libc6, libxkbcommon0, libxkbcommon-x11-0, libwayland-client0, libvulkan1, libx11-xcb1, libxcb1, libfontconfig1, libfreetype6
+Depends: libc6, libxkbcommon0, libxkbcommon-x11-0, libwayland-client0, libvulkan1, libx11-xcb1, libxcb1, libfontconfig1, libfreetype6, libgtk-3-0, libwebkit2gtk-4.1-0
 Recommends: mesa-vulkan-drivers
 Installed-Size: $(du -sk "$DEB_ROOT/usr" | cut -f1)
 Maintainer: ByteV0rtex <https://github.com/ByteV0rtex/calcite>

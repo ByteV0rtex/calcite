@@ -7,6 +7,9 @@
 #ifndef Binary
   #define Binary "..\..\target\release\calcite.exe"
 #endif
+#ifndef LoginBinary
+  #define LoginBinary "..\..\target\release\calcite-login.exe"
+#endif
 
 [Setup]
 AppId={{E548880D-1912-4936-87E1-597361749756}
@@ -42,6 +45,8 @@ Name: "mrpack"; Description: "Open .mrpack modpacks with Calcite"; GroupDescript
 
 [Files]
 Source: "{#Binary}"; DestDir: "{app}"; DestName: "calcite.exe"; Flags: ignoreversion
+; Microsoft sign-in window; Calcite looks for it next to itself.
+Source: "{#LoginBinary}"; DestDir: "{app}"; DestName: "calcite-login.exe"; Flags: ignoreversion
 
 [Icons]
 Name: "{autoprograms}\Calcite"; Filename: "{app}\calcite.exe"

@@ -21,12 +21,14 @@ if [[ -z "${CALCITE_CURSEFORGE_KEY:-}" && -f .curseforge-key ]]; then
 fi
 
 if [[ -z "${SKIP_BUILD:-}" ]]; then
-  cargo build --release -p calcite
+  # The app and its sign-in helper (Microsoft's page in a web view).
+  cargo build --release -p calcite -p calcite-login
 fi
 
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$TARGET/release/calcite" "$APP/Contents/MacOS/calcite"
+cp "$TARGET/release/calcite-login" "$APP/Contents/MacOS/calcite-login"
 cp packaging/icons/Calcite.icns "$APP/Contents/Resources/Calcite.icns"
 sed "s/@VERSION@/$VERSION/g" packaging/macos/Info.plist > "$APP/Contents/Info.plist"
 plutil -lint "$APP/Contents/Info.plist" >/dev/null
