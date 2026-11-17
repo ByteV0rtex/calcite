@@ -477,15 +477,22 @@ impl DiscoverPage {
         let state = AppState::global(cx);
         let busy_key = format!("cf:{}", project.id);
         let action: gpui_kit::AnyElement = if class == Class::Modpacks {
-            let page = page.clone();
-            Button::new(SharedString::from(format!("cf-open-{}", project.id)))
-                .icon("arrow-up-right")
-                .label("Get on CurseForge")
+            let (id, name) = (project.id, project.name.clone());
+            let started = self.started.contains(&busy_key);
+            Button::new(SharedString::from(format!("cf-install-{}", project.id)))
+                .icon("arrow-down-to-line")
+                .label(if started { "Installing" } else { "Install" })
                 .small()
-                .on_click(move |_, _, cx| {
+                .primary()
+                .disabled(started)
+                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                     cx.stop_propagation();
-                    cx.open_url(&page)
-                })
+                    this.started.insert(format!("cf:{id}"));
+                    let name = name.clone();
+                    AppState::global(cx)
+                        .update(cx, |s, cx| s.install_curseforge_pack(Ok((id, name)), cx));
+                    cx.notify();
+                }))
                 .into_any_element()
         } else if let Some(target) = self.target.clone() {
             let busy = state.read(cx).is_installing(&target, &busy_key);

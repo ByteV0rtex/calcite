@@ -632,6 +632,12 @@ impl Shell {
                         Dropped::Modpack => this
                             .state
                             .update(cx, |s, cx| s.install_modpack_file(path, cx)),
+                        Dropped::CurseForgePack
+                            if calcite_core::curseforge::api_key().is_some() =>
+                        {
+                            this.state
+                                .update(cx, |s, cx| s.install_curseforge_pack(Err(path), cx))
+                        }
                         Dropped::CurseForgePack => skipped.push(format!(
                             "{} is a CurseForge modpack: import it from Settings → Move in.",
                             name(&path)

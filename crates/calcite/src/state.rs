@@ -1660,6 +1660,77 @@ impl AppState {
         .detach();
     }
 
+    /// Install a CurseForge modpack: from Discover (`Ok(project id)`) or a
+    /// dropped zip (`Err(path)`). It's turned into a Modrinth pack and
+    /// installed like one; mods only on curseforge.com are listed after.
+    pub fn install_curseforge_pack(
+        &mut self,
+        source: Result<(u64, String), PathBuf>,
+        cx: &mut Context<Self>,
+    ) {
+        use calcite_core::curseforge;
+        let title = match &source {
+            Ok((_, name)) => name.clone(),
+            Err(path) => path
+                .file_stem()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| "the modpack".into()),
+        };
+        self.notice = Some(Notice {
+            title: format!("Getting {title} ready").into(),
+            body: "Looking up its mods on CurseForge…".into(),
+            is_error: false,
+        });
+        cx.notify();
+        let task = Backend::global(cx).run(async move {
+            let http = reqwest::Client::builder()
+                .user_agent(concat!("calcite/", env!("CARGO_PKG_VERSION")))
+                .connect_timeout(std::time::Duration::from_secs(15))
+                .build()?;
+            let client = curseforge::Client::new(http).ok_or_else(|| {
+                anyhow::anyhow!("This build of Calcite can't reach CurseForge (no API key).")
+            })?;
+            let out = std::env::temp_dir().join(format!("calcite-cf-{}", uuid::Uuid::new_v4()));
+            match source {
+                Ok((project, _)) => curseforge::prepare_pack(&client, project, &out).await,
+                Err(path) => curseforge::convert_pack_file(&client, &path, &out).await,
+            }
+        });
+        cx.spawn(async move |this, cx| {
+            let result = task.await.and_then(|r| r);
+            let _ = this.update(cx, |this, cx| {
+                match result {
+                    Ok((mrpack, name, manual)) => {
+                        this.install_modpack_file(mrpack, cx);
+                        if manual.is_empty() {
+                            this.notice = None;
+                        } else {
+                            this.notice = Some(Notice {
+                                title: format!(
+                                    "{} mod{} in {name} must be downloaded by hand",
+                                    manual.len(),
+                                    if manual.len() == 1 { "" } else { "s" }
+                                )
+                                .into(),
+                                body: format!(
+                                    "Their authors only allow downloads on curseforge.com: {}. Download them there and drop them on the new instance.",
+                                    manual.join(", ")
+                                )
+                                .into(),
+                                is_error: true,
+                            });
+                        }
+                    }
+                    Err(error) => {
+                        this.notify_error(format!("Couldn't install {title}"), format!("{error:#}"))
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     /// Install a modpack file (.mrpack) as a new instance.
     pub fn install_modpack_file(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         let install = Backend::global(cx).call(async move {

@@ -1107,6 +1107,7 @@ dependencies = [
  "chrono",
  "dirs 7.0.0",
  "fs4",
+ "futures",
  "hkdf 0.13.0",
  "image",
  "p256",
