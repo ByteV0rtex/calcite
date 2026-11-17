@@ -34,6 +34,7 @@ rust-embed.workspace = true
 smallvec.workspace = true
 url.workspace = true
 uuid.workspace = true
+sha1 = "0.11.0"
 reflink-copy = "0.1.33"
 # Opt-in desktop notifications (already built for the backend).
 notify-rust = "4.19.0"

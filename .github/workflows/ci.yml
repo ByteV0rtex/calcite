@@ -96,6 +96,9 @@ jobs:
       # release) or for a version tag; nobody needs one on every push.
       - name: Release build
         if: (github.event_name == 'workflow_dispatch' && inputs.release) || startsWith(github.ref, 'refs/tags/')
+        env:
+          # Turns on CurseForge; unset (forks, pull requests) just leaves it off.
+          CALCITE_CURSEFORGE_KEY: ${{ secrets.CALCITE_CURSEFORGE_KEY }}
         run: cargo build --release -p calcite
 
       - name: Package (macOS .app and .dmg)

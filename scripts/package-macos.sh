@@ -13,6 +13,13 @@ TARGET=${CARGO_TARGET_DIR:-target}
 DIST=dist
 APP="$DIST/Calcite.app"
 
+# CurseForge needs an API key at build time. It's never in the source:
+# CI passes a secret, and locally it's read from .curseforge-key.
+if [[ -z "${CALCITE_CURSEFORGE_KEY:-}" && -f .curseforge-key ]]; then
+  CALCITE_CURSEFORGE_KEY=$(tr -d '[:space:]' < .curseforge-key)
+  export CALCITE_CURSEFORGE_KEY
+fi
+
 if [[ -z "${SKIP_BUILD:-}" ]]; then
   cargo build --release -p calcite
 fi

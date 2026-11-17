@@ -78,6 +78,15 @@ impl InstanceInfo {
     }
 }
 
+/// How adding a CurseForge file went.
+enum CfOutcome {
+    Added(String),
+    /// No file for this game version (and loader).
+    NoVersion(String),
+    /// The author only allows downloads on the website.
+    WebsiteOnly,
+}
+
 pub fn loader_name(loader: ModLoader) -> &'static str {
     match loader {
         ModLoader::Vanilla => "Vanilla",
@@ -1732,6 +1741,129 @@ impl AppState {
                     this.notify_error("Some files couldn't be added", failed.join("\n"));
                 }
                 *this.content_revision.entry(instance_id).or_default() += 1;
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Download the newest CurseForge file of `project` that fits the
+    /// instance (game version, and loader for mods) and add it.
+    pub fn install_curseforge(
+        &mut self,
+        instance_id: String,
+        project: calcite_core::curseforge::Project,
+        class: calcite_core::curseforge::Class,
+        cx: &mut Context<Self>,
+    ) {
+        use calcite_core::curseforge::{Class, Client};
+        use theseus::data::ProjectType;
+        let Some(info) = self.instance(&instance_id).cloned() else {
+            return;
+        };
+        let key = format!("cf:{}", project.id);
+        self.installing
+            .entry(instance_id.clone())
+            .or_default()
+            .push(key.clone());
+        cx.notify();
+        let game_version = info.game_version.to_string();
+        let loader = (class == Class::Mods).then(|| loader_name(info.loader).to_string());
+        let id = instance_id.clone();
+        let project_id = project.id;
+        let page = project.page_url();
+        let task = Backend::global(cx).run(async move {
+            let http = reqwest::Client::builder()
+                .user_agent(concat!("calcite/", env!("CARGO_PKG_VERSION")))
+                .connect_timeout(std::time::Duration::from_secs(15))
+                .build()?;
+            let client = Client::new(http.clone())
+                .ok_or_else(|| anyhow::anyhow!("This build of Calcite has no CurseForge key."))?;
+            let files = client
+                .files(project_id, Some(&game_version), loader.as_deref())
+                .await?;
+            let Some(file) = files.iter().find(|f| f.download_url.is_some()) else {
+                return Ok(if files.is_empty() {
+                    CfOutcome::NoVersion(game_version)
+                } else {
+                    CfOutcome::WebsiteOnly
+                });
+            };
+            let url = file.download_url.clone().unwrap_or_default();
+            let bytes = http
+                .get(&url)
+                .timeout(std::time::Duration::from_secs(300))
+                .send()
+                .await?
+                .error_for_status()?
+                .bytes()
+                .await?;
+            if let Some(expected) = file.sha1() {
+                use sha1::Digest as _;
+                let got: String = sha1::Sha1::digest(&bytes)
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect();
+                if !got.eq_ignore_ascii_case(expected) {
+                    anyhow::bail!("The download was damaged (checksum mismatch). Try again.");
+                }
+            }
+            // A plain file name only: never let a server pick the path.
+            let name = std::path::Path::new(&file.file_name)
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .filter(|n| !n.is_empty())
+                .unwrap_or_else(|| format!("curseforge-{}.jar", file.id));
+            let dir = std::env::temp_dir().join(format!("calcite-cf-{}", uuid::Uuid::new_v4()));
+            tokio::fs::create_dir_all(&dir).await?;
+            let path = dir.join(&name);
+            tokio::fs::write(&path, &bytes).await?;
+            let project_type = match class {
+                Class::ResourcePacks => ProjectType::ResourcePack,
+                Class::Shaders => ProjectType::ShaderPack,
+                _ => ProjectType::Mod,
+            };
+            let added = theseus::instance::add_project_from_path(&id, &path, Some(project_type))
+                .await
+                .map(|_| ())
+                .map_err(|e| anyhow::anyhow!("{e}"));
+            let _ = tokio::fs::remove_dir_all(&dir).await;
+            added?;
+            Ok(CfOutcome::Added(file.display_name.clone()))
+        });
+        let title = project.name.clone();
+        cx.spawn(async move |this, cx| {
+            let result = task.await.and_then(|r| r);
+            let _ = this.update(cx, |this, cx| {
+                if let Some(list) = this.installing.get_mut(&instance_id) {
+                    list.retain(|p| *p != key);
+                }
+                let name = this
+                    .instance(&instance_id)
+                    .map(|i| i.name.to_string())
+                    .unwrap_or_default();
+                match result {
+                    Ok(CfOutcome::Added(file)) => {
+                        this.notice = Some(Notice {
+                            title: format!("Added {title} to {name}").into(),
+                            body: format!("{file}, from CurseForge.").into(),
+                            is_error: false,
+                        });
+                        *this.content_revision.entry(instance_id.clone()).or_default() += 1;
+                    }
+                    Ok(CfOutcome::NoVersion(version)) => this.notify_error(
+                        format!("{title} isn't out for {version}"),
+                        "CurseForge has no file of it for this instance's game version and loader.",
+                    ),
+                    Ok(CfOutcome::WebsiteOnly) => {
+                        cx.open_url(&page);
+                        this.notify_error(
+                            format!("{title} only downloads from curseforge.com"),
+                            "Its author doesn't let other apps download it. Its page is open in your browser: download it there, then drop the file on Calcite.",
+                        );
+                    }
+                    Err(error) => this.notify_error(format!("Couldn't add {title}"), format!("{error:#}")),
+                }
                 cx.notify();
             });
         })

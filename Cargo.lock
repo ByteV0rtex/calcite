@@ -1084,6 +1084,7 @@ dependencies = [
  "rust-embed",
  "serde",
  "serde_json",
+ "sha1",
  "smallvec",
  "tempfile",
  "theseus",

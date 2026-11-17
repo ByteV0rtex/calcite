@@ -9,6 +9,11 @@ Set-Location (Join-Path $PSScriptRoot '..')
 $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.*)"' |
     Select-Object -First 1).Matches[0].Groups[1].Value
 $target = if ($env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR } else { 'target' }
+# CurseForge needs an API key at build time; CI passes a secret, and
+# locally it's read from .curseforge-key. It's never in the source.
+if (-not $env:CALCITE_CURSEFORGE_KEY -and (Test-Path .curseforge-key)) {
+    $env:CALCITE_CURSEFORGE_KEY = (Get-Content .curseforge-key -Raw).Trim()
+}
 if (-not $SkipBuild) {
     cargo build --release -p calcite
     if ($LASTEXITCODE) { exit $LASTEXITCODE }

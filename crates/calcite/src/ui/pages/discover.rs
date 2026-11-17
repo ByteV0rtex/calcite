@@ -5,9 +5,12 @@
 
 use std::time::Duration;
 
+use calcite_core::curseforge::{self, Class};
 use calcite_core::modrinth::{ProjectType, SearchHit, SearchIndex, SearchQuery, SearchResults};
 use gpui_kit::component::Sizable as _;
+use gpui_kit::component::button::Button as KitButton;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::select::{SearchableVec, Select, SelectEvent, SelectState};
 use gpui_kit::prelude::*;
 use gpui_kit::{
@@ -63,6 +66,11 @@ pub struct DiscoverPage {
     /// The Servers tab (made the first time it's opened).
     servers: Option<Entity<crate::ui::pages::servers::ServersBrowser>>,
     showing_servers: bool,
+    /// Searching CurseForge instead of Modrinth (only offered when this
+    /// build has a CurseForge key).
+    curseforge: bool,
+    /// CurseForge results and how many there are in all.
+    cf_results: Option<Result<(Vec<curseforge::Project>, u64), String>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -133,6 +141,8 @@ impl DiscoverPage {
             pending: None,
             servers: None,
             showing_servers: false,
+            curseforge: false,
+            cf_results: None,
             categories: Vec::new(),
             installed_packs: Default::default(),
             hide_installed: false,
@@ -331,6 +341,9 @@ impl DiscoverPage {
     /// Run the current query after `delay`. A newer call replaces an older
     /// pending one, which is all the debouncing typing needs.
     fn search(&mut self, delay: Duration, cx: &mut Context<Self>) {
+        if self.curseforge {
+            return self.search_curseforge(delay, cx);
+        }
         let query = self.query.clone();
         let client = cx.global::<Api>().0.clone();
         let backend = Backend::global(cx).clone();
@@ -351,6 +364,245 @@ impl DiscoverPage {
                 cx.notify();
             });
         }));
+    }
+
+    /// The CurseForge section matching the open tab (none for data packs).
+    fn cf_class(&self) -> Option<Class> {
+        match self.query.project_type {
+            ProjectType::Modpack => Some(Class::Modpacks),
+            ProjectType::Mod => Some(Class::Mods),
+            ProjectType::Resourcepack => Some(Class::ResourcePacks),
+            ProjectType::Shader => Some(Class::Shaders),
+            _ => None,
+        }
+    }
+
+    fn search_curseforge(&mut self, delay: Duration, cx: &mut Context<Self>) {
+        let Some(class) = self.cf_class() else {
+            self.cf_results = Some(Ok((Vec::new(), 0)));
+            cx.notify();
+            return;
+        };
+        let query = curseforge::Query {
+            text: self.query.text.clone(),
+            class: Some(class),
+            game_version: self.query.game_versions.first().cloned(),
+            loader: (class == Class::Mods)
+                .then(|| self.query.loaders.first().cloned())
+                .flatten(),
+            offset: 0,
+        };
+        let backend = Backend::global(cx).clone();
+        self.loading = true;
+        cx.notify();
+        self.pending = Some(cx.spawn(async move |this, cx| {
+            if !delay.is_zero() {
+                cx.background_executor().timer(delay).await;
+            }
+            let result = backend
+                .run(async move {
+                    let http = reqwest::Client::builder()
+                        .user_agent(concat!("calcite/", env!("CARGO_PKG_VERSION")))
+                        .timeout(Duration::from_secs(20))
+                        .build()?;
+                    let client = curseforge::Client::new(http)
+                        .ok_or_else(|| anyhow::anyhow!("no CurseForge key in this build"))?;
+                    let results = client.search(&query).await?;
+                    anyhow::Ok((results.projects, results.total))
+                })
+                .await
+                .and_then(|r| r)
+                .map_err(|e| format!("{e:#}"));
+            let _ = this.update(cx, |this, cx| {
+                this.cf_results = Some(result);
+                this.loading = false;
+                cx.notify();
+            });
+        }));
+    }
+
+    /// Modrinth or CurseForge, when this build can do both.
+    fn source_switch(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        curseforge::api_key()?;
+        let p = cx.palette().clone();
+        let mut row = div()
+            .flex()
+            .items_center()
+            .gap(space(0.5))
+            .p(space(0.5))
+            .rounded(px(radius::MD))
+            .bg(p.surface)
+            .border_1()
+            .border_color(p.border);
+        for (cf, label) in [(false, "Modrinth"), (true, "CurseForge")] {
+            let active = self.curseforge == cf;
+            row = row.child(
+                div()
+                    .id(SharedString::from(format!("source-{label}")))
+                    .h(px(26.0))
+                    .px(space(2.5))
+                    .flex()
+                    .items_center()
+                    .rounded(px(radius::SM))
+                    .text_size(px(type_scale::SMALL))
+                    .font_weight(FontWeight::MEDIUM)
+                    .cursor_pointer()
+                    .when(active, |d| d.bg(p.raised).text_color(p.text))
+                    .when(!active, |d| {
+                        d.text_color(p.text_secondary)
+                            .hover(|s| s.text_color(p.text))
+                    })
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        if this.curseforge != cf {
+                            this.curseforge = cf;
+                            this.search(Duration::ZERO, cx);
+                        }
+                    }))
+                    .child(label),
+            );
+        }
+        Some(row)
+    }
+
+    fn cf_row(
+        &self,
+        ix: usize,
+        project: &curseforge::Project,
+        class: Class,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let p = cx.palette().clone();
+        let source = project.icon_url().and_then(|url| Images::get(url, 128, cx));
+        let page = project.page_url();
+        let state = AppState::global(cx);
+        let busy_key = format!("cf:{}", project.id);
+        let action: gpui_kit::AnyElement = if class == Class::Modpacks {
+            let page = page.clone();
+            Button::new(SharedString::from(format!("cf-open-{}", project.id)))
+                .icon("arrow-up-right")
+                .label("Get on CurseForge")
+                .small()
+                .on_click(move |_, _, cx| {
+                    cx.stop_propagation();
+                    cx.open_url(&page)
+                })
+                .into_any_element()
+        } else if let Some(target) = self.target.clone() {
+            let busy = state.read(cx).is_installing(&target, &busy_key);
+            let project = project.clone();
+            Button::new(SharedString::from(format!("cf-add-{}", project.id)))
+                .icon("plus")
+                .label(if busy { "Adding…" } else { "Add" })
+                .small()
+                .primary()
+                .disabled(busy)
+                .on_click(move |_, _, cx| {
+                    cx.stop_propagation();
+                    let (target, project) = (target.clone(), project.clone());
+                    AppState::global(cx)
+                        .update(cx, |s, cx| s.install_curseforge(target, project, class, cx));
+                })
+                .into_any_element()
+        } else {
+            let instances: Vec<(String, String)> = state
+                .read(cx)
+                .instances
+                .iter()
+                .take(25)
+                .map(|i| (i.id.clone(), format!("{} · {}", i.name, i.loader_line())))
+                .collect();
+            let project = project.clone();
+            KitButton::new(SharedString::from(format!("cf-add-to-{}", project.id)))
+                .small()
+                .outline()
+                .label("Add to…")
+                .dropdown_menu(move |mut menu, _, _| {
+                    menu = menu.label("Add to");
+                    for (id, label) in &instances {
+                        let (id, project) = (id.clone(), project.clone());
+                        menu = menu.item(PopupMenuItem::new(label.clone()).on_click(
+                            move |_, _, cx| {
+                                let (id, project) = (id.clone(), project.clone());
+                                AppState::global(cx).update(cx, |s, cx| {
+                                    s.install_curseforge(id, project, class, cx)
+                                });
+                            },
+                        ));
+                    }
+                    menu
+                })
+                .into_any_element()
+        };
+        div()
+            .id(SharedString::from(format!("cf-{ix}")))
+            .flex()
+            .gap(space(4.0))
+            .p(space(4.0))
+            .rounded(px(radius::LG))
+            .bg(p.surface)
+            .border_1()
+            .border_color(p.border)
+            .hover(|s| s.border_color(p.border_strong))
+            .cursor_pointer()
+            .on_click(move |_, _, cx| cx.open_url(&page))
+            .child(thumb(source, &project.name, 72.0, radius::LG, cx))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(space(1.5))
+                    .flex_1()
+                    .min_w_0()
+                    .child(
+                        div()
+                            .flex()
+                            .items_baseline()
+                            .gap(space(2.0))
+                            .child(
+                                div()
+                                    .text_size(px(type_scale::SECTION))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(p.text)
+                                    .truncate()
+                                    .child(project.name.clone()),
+                            )
+                            .when(!project.author().is_empty(), |d| {
+                                d.child(
+                                    div()
+                                        .flex_none()
+                                        .text_size(px(type_scale::SMALL))
+                                        .text_color(p.text_muted)
+                                        .child(format!("by {}", project.author())),
+                                )
+                            }),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(type_scale::BODY))
+                            .text_color(p.text_secondary)
+                            .line_clamp(2)
+                            .child(project.summary.clone()),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .items_end()
+                    .justify_between()
+                    .flex_none()
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(space(1.5))
+                            .text_size(px(type_scale::SMALL))
+                            .text_color(p.text_secondary)
+                            .child(icon("arrow-down-to-line", 12.0, p.text_muted))
+                            .child(compact_number(project.download_count as u64)),
+                    )
+                    .child(action),
+            )
     }
 
     fn type_tabs(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -830,7 +1082,62 @@ impl Render for DiscoverPage {
 
         let mut list = div().flex().flex_col().gap(space(2.5));
         let mut more = false;
+        let cf_class = self.cf_class();
+        let cf_total = match (&self.curseforge, &self.cf_results) {
+            (true, Some(Ok((_, total)))) => Some(*total),
+            _ => None,
+        };
+        if self.curseforge {
+            match (self.cf_results.clone(), cf_class) {
+                (_, None) => {
+                    list = list.child(empty_state(
+                        "package",
+                        "Not on CurseForge",
+                        "CurseForge has no section for these. Switch back to Modrinth.",
+                        None,
+                        cx,
+                    ));
+                }
+                (None, _) => {
+                    for _ in 0..4 {
+                        list = list.child(skeleton(gpui_kit::relative(1.0), px(104.0), cx));
+                    }
+                }
+                (Some(Err(error)), _) => {
+                    list = list.child(empty_state(
+                        "wifi-off",
+                        "Couldn't reach CurseForge",
+                        format!("Check your connection and try again. ({error})"),
+                        Some(
+                            Button::new("cf-retry")
+                                .icon("refresh-cw")
+                                .label("Try again")
+                                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                    this.search(Duration::ZERO, cx)
+                                }))
+                                .into_any_element(),
+                        ),
+                        cx,
+                    ));
+                }
+                (Some(Ok((projects, _))), Some(_)) if projects.is_empty() => {
+                    list = list.child(empty_state(
+                        "search",
+                        "Nothing matches",
+                        "Try fewer words or another version.",
+                        None,
+                        cx,
+                    ));
+                }
+                (Some(Ok((projects, _))), Some(class)) => {
+                    for (ix, project) in projects.iter().enumerate() {
+                        list = list.child(self.cf_row(ix, project, class, cx));
+                    }
+                }
+            }
+        }
         match &self.results {
+            _ if self.curseforge => {}
             None => {
                 for _ in 0..6 {
                     list = list.child(
@@ -915,8 +1222,10 @@ impl Render for DiscoverPage {
             );
         }
 
-        let total = match &self.results {
-            Some(Ok(r)) => Some(format!("{} results", compact_number(r.total_hits as u64))),
+        let total = match (&self.results, cf_total) {
+            (_, Some(n)) => Some(format!("{} results on CurseForge", compact_number(n))),
+            _ if self.curseforge => None,
+            (Some(Ok(r)), _) => Some(format!("{} results", compact_number(r.total_hits as u64))),
             _ => None,
         };
         let target = self
@@ -1012,9 +1321,10 @@ impl Render for DiscoverPage {
                                 ))
                             })
                             .child(div().flex_1())
-                            .child(self.sort_row(cx)),
+                            .children(self.source_switch(cx))
+                            .when(!self.curseforge, |d| d.child(self.sort_row(cx))),
                     )
-                    .child(self.filters(cx)),
+                    .when(!self.curseforge, |d| d.child(self.filters(cx))),
             )
             .child(
                 div()
