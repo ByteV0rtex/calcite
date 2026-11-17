@@ -136,13 +136,22 @@ impl MoveInPage {
                     .into_iter()
                     .map(|i| ("Feather Client", i)),
             );
+            installations.extend(
+                launchers::dawn_installations(&home)
+                    .into_iter()
+                    .map(|i| ("Dawn (Feather)", i)),
+            );
             let (lunar, feather) = launchers::client_present(&home, &data, &mc);
             let mut clients_without_mods = Vec::new();
             if lunar && !installations.iter().any(|(s, _)| *s == "Lunar Client") {
                 clients_without_mods.push("Lunar Client");
             }
-            if feather && !installations.iter().any(|(s, _)| *s == "Feather Client") {
-                clients_without_mods.push("Feather Client");
+            if feather
+                && !installations
+                    .iter()
+                    .any(|(s, _)| matches!(*s, "Feather Client" | "Dawn (Feather)"))
+            {
+                clients_without_mods.push("Dawn (Feather)");
             }
             Found {
                 modrinth,
@@ -612,7 +621,7 @@ impl Render for MoveInPage {
                     list = list.child(empty_state(
                         "search",
                         "No other launchers found",
-                        "Calcite looked for Modrinth App, Prism, MultiMC, ATLauncher, GDLauncher, the CurseForge app, the Minecraft Launcher, Lunar and Feather.",
+                        "Calcite looked for Modrinth App, Prism, MultiMC, ATLauncher, GDLauncher, the CurseForge app, the Minecraft Launcher, Lunar, and Dawn (Feather).",
                         None,
                         cx,
                     ));
@@ -623,7 +632,12 @@ impl Render for MoveInPage {
                 for launcher in found.others.clone() {
                     list = list.child(self.other_card(&launcher, cx));
                 }
-                for source in ["Minecraft Launcher", "Lunar Client", "Feather Client"] {
+                for source in [
+                    "Minecraft Launcher",
+                    "Lunar Client",
+                    "Dawn (Feather)",
+                    "Feather Client",
+                ] {
                     let items: Vec<Installation> = found
                         .installations
                         .iter()

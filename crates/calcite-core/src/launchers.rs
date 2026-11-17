@@ -204,6 +204,25 @@ pub fn version_in_name(name: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+/// The loader a mods folder is for, from names like `forge-1.20.1` (Lunar)
+/// or `1.20.1-fabric` (Feather).
+fn loader_in_name(name: &str) -> Option<Loader> {
+    let name = name.to_ascii_lowercase();
+    let has =
+        |word: &str| name.starts_with(&format!("{word}-")) || name.ends_with(&format!("-{word}"));
+    if has("neoforge") {
+        Some(Loader::NeoForge)
+    } else if has("forge") {
+        Some(Loader::Forge)
+    } else if has("quilt") {
+        Some(Loader::Quilt)
+    } else if has("fabric") {
+        Some(Loader::Fabric)
+    } else {
+        None
+    }
+}
+
 /// Folders of `.jar` files under `root` (a few levels deep), each with the
 /// number of jars it holds.
 fn jar_folders(root: &Path, max_depth: usize) -> Vec<(PathBuf, usize)> {
@@ -251,10 +270,28 @@ fn client_installations(client: &str, roots: &[PathBuf], game_dir: &Path) -> Vec
             {
                 continue;
             }
+            let loader = folder
+                .ancestors()
+                .take_while(|p| p.starts_with(root))
+                .filter_map(|p| p.file_name()?.to_str().and_then(loader_in_name))
+                .next()
+                .unwrap_or(Loader::Fabric);
+            // Lunar keeps modpacks as profiles/<modrinth|curseforge>/<pack>/…
+            let pack = folder.strip_prefix(root).ok().and_then(|rel| {
+                let mut parts = rel.components().map(|c| c.as_os_str().to_string_lossy());
+                let kind = parts.next()?;
+                let name = parts.next()?;
+                matches!(kind.as_ref(), "modrinth" | "curseforge").then(|| name.to_string())
+            });
+            let name = match (&pack, loader) {
+                (Some(pack), _) => format!("{pack} ({client})"),
+                (None, Loader::Fabric) => format!("{client} {game_version}"),
+                (None, loader) => format!("{client} {game_version} {loader:?}"),
+            };
             list.push(Installation {
-                name: format!("{client} {game_version}"),
+                name,
                 version: ParsedVersion {
-                    loader: Loader::Fabric,
+                    loader,
                     game_version,
                     loader_version: None,
                 },
@@ -292,6 +329,77 @@ pub fn feather_installations(
     client_installations("Feather Client", &roots, minecraft_dir)
 }
 
+/// Dawn, the new name of Feather Client, keeps one folder per profile in
+/// `~/.dawn/profiles`: `profile.json` says what it runs and the game files
+/// (mods, worlds, packs, options) are in `private-game-content`.
+pub fn dawn_installations(home: &Path) -> Vec<Installation> {
+    let Ok(entries) = std::fs::read_dir(home.join(".dawn/profiles")) else {
+        return Vec::new();
+    };
+    let mut list: Vec<Installation> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let dir = entry.path();
+            let raw = std::fs::read(dir.join("profile.json")).ok()?;
+            let file: DawnFile = serde_json::from_slice(&raw).ok()?;
+            let profile = file.profile;
+            let loader = match profile.loader.as_ref().map(|l| l.kind.to_ascii_lowercase()) {
+                None => Loader::Vanilla,
+                Some(kind) => match kind.as_str() {
+                    "fabric" => Loader::Fabric,
+                    "quilt" => Loader::Quilt,
+                    "forge" => Loader::Forge,
+                    "neoforge" => Loader::NeoForge,
+                    _ => Loader::Vanilla,
+                },
+            };
+            let game_dir = dir.join("private-game-content");
+            let mods = game_dir.join("mods");
+            let mod_count = std::fs::read_dir(&mods)
+                .map(|e| {
+                    e.flatten()
+                        .filter(|f| f.path().extension().is_some_and(|x| x == "jar"))
+                        .count()
+                })
+                .unwrap_or(0);
+            Some(Installation {
+                name: profile.name.trim().to_string(),
+                version: ParsedVersion {
+                    loader,
+                    game_version: profile.minecraft_version,
+                    loader_version: profile.loader.map(|l| l.version).filter(|v| !v.is_empty()),
+                },
+                has_content: has_game_content(&game_dir),
+                mods_dir: (mod_count > 0).then_some(mods),
+                game_dir,
+                mod_count,
+            })
+        })
+        .collect();
+    list.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    list
+}
+
+#[derive(serde::Deserialize)]
+struct DawnFile {
+    profile: DawnProfile,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DawnProfile {
+    name: String,
+    minecraft_version: String,
+    loader: Option<DawnLoader>,
+}
+
+#[derive(serde::Deserialize)]
+struct DawnLoader {
+    kind: String,
+    #[serde(default)]
+    version: String,
+}
+
 /// Lunar or Feather is installed (even if there's nothing to bring yet).
 pub fn client_present(home: &Path, data_dir: &Path, minecraft_dir: &Path) -> (bool, bool) {
     let lunar = home.join(".lunarclient").is_dir();
@@ -300,6 +408,7 @@ pub fn client_present(home: &Path, data_dir: &Path, minecraft_dir: &Path) -> (bo
         data_dir.join(".feather"),
         data_dir.join("feather"),
         home.join(".feather"),
+        home.join(".dawn"),
     ]
     .iter()
     .any(|p| p.is_dir());
@@ -369,10 +478,18 @@ mod tests {
         let data = tmp.path().join("data");
         let mc = data.join("minecraft");
         std::fs::create_dir_all(mc.join("saves/World")).unwrap();
-        let lunar_mods = home.join(".lunarclient/profiles/lunar/1.21.4/mods");
+        // Lunar 3.4: profiles/<type>/<major version or pack>/mods/<loader>-<version>.
+        let lunar_mods = home.join(".lunarclient/profiles/lunar/1.21/mods/fabric-1.21.4");
         std::fs::create_dir_all(&lunar_mods).unwrap();
         std::fs::write(lunar_mods.join("sodium.jar"), b"x").unwrap();
         std::fs::write(lunar_mods.join("iris.jar"), b"x").unwrap();
+        let lunar_forge = home.join(".lunarclient/profiles/lunar/1.20/mods/forge-1.20.1");
+        std::fs::create_dir_all(&lunar_forge).unwrap();
+        std::fs::write(lunar_forge.join("jei.jar"), b"x").unwrap();
+        let lunar_pack =
+            home.join(".lunarclient/profiles/modrinth/fabulously-optimized/mods/fabric-1.21.4");
+        std::fs::create_dir_all(&lunar_pack).unwrap();
+        std::fs::write(lunar_pack.join("fo.jar"), b"x").unwrap();
         let feather_mods = data.join(".feather/user-mods/1.20.1-fabric");
         std::fs::create_dir_all(&feather_mods).unwrap();
         std::fs::write(feather_mods.join("modmenu.jar"), b"x").unwrap();
@@ -380,17 +497,56 @@ mod tests {
         std::fs::create_dir_all(home.join(".lunarclient/profiles/misc")).unwrap();
         std::fs::write(home.join(".lunarclient/profiles/misc/x.jar"), b"x").unwrap();
 
-        let lunar = lunar_installations(&home, &mc);
-        assert_eq!(lunar.len(), 1);
-        assert_eq!(lunar[0].name, "Lunar Client 1.21.4");
-        assert_eq!(lunar[0].mod_count, 2);
-        assert!(lunar[0].has_content);
+        let mut lunar = lunar_installations(&home, &mc);
+        lunar.sort_by(|a, b| a.name.cmp(&b.name));
+        let names: Vec<_> = lunar.iter().map(|i| i.name.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "Lunar Client 1.20.1 Forge",
+                "Lunar Client 1.21.4",
+                "fabulously-optimized (Lunar Client)"
+            ]
+        );
+        assert_eq!(lunar[0].version.loader, Loader::Forge);
+        assert_eq!(lunar[1].mod_count, 2);
+        assert_eq!(lunar[2].version.game_version, "1.21.4");
+        assert!(lunar[1].has_content);
 
         let feather = feather_installations(&home, &data, &mc);
         assert_eq!(feather.len(), 1);
         assert_eq!(feather[0].version.game_version, "1.20.1");
         assert_eq!(feather[0].version.loader, Loader::Fabric);
         assert_eq!(client_present(&home, &data, &mc), (true, true));
+    }
+
+    #[test]
+    fn reads_dawn_profiles() {
+        let home = tempfile::tempdir().unwrap();
+        let profile = home.path().join(".dawn/profiles/dawn-performance");
+        let game = profile.join("private-game-content");
+        std::fs::create_dir_all(game.join("mods")).unwrap();
+        std::fs::create_dir_all(game.join("saves/World")).unwrap();
+        std::fs::write(game.join("mods/sodium.jar"), b"x").unwrap();
+        // The shape Dawn 0.2 writes (trimmed).
+        std::fs::write(
+            profile.join("profile.json"),
+            r#"{"schemaVersion":4,"profile":{"id":"dawn-performance","kind":"Custom","name":"Dawn","minecraftVersion":"26.3","loader":{"kind":"Fabric","version":"0.19.5"},"settings":{}}}"#,
+        )
+        .unwrap();
+        // Not a profile.
+        std::fs::create_dir_all(home.path().join(".dawn/profiles/junk")).unwrap();
+
+        let list = dawn_installations(home.path());
+        assert_eq!(list.len(), 1);
+        let dawn = &list[0];
+        assert_eq!(dawn.name, "Dawn");
+        assert_eq!(dawn.version.game_version, "26.3");
+        assert_eq!(dawn.version.loader, Loader::Fabric);
+        assert_eq!(dawn.version.loader_version.as_deref(), Some("0.19.5"));
+        assert_eq!(dawn.mod_count, 1);
+        assert_eq!(dawn.game_dir, game);
+        assert!(dawn.has_content);
     }
 
     #[test]
