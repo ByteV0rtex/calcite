@@ -33,10 +33,14 @@ cp packaging/icons/Calcite.icns "$APP/Contents/Resources/Calcite.icns"
 sed "s/@VERSION@/$VERSION/g" packaging/macos/Info.plist > "$APP/Contents/Info.plist"
 plutil -lint "$APP/Contents/Info.plist" >/dev/null
 
+ENTITLEMENTS=packaging/macos/Calcite.entitlements
 if [[ -n "${MACOS_SIGN_IDENTITY:-}" ]]; then
-  codesign --force --options runtime --timestamp --sign "$MACOS_SIGN_IDENTITY" "$APP"
+  codesign --force --options runtime --timestamp --entitlements "$ENTITLEMENTS" \
+    --sign "$MACOS_SIGN_IDENTITY" "$APP/Contents/MacOS/calcite-login"
+  codesign --force --options runtime --timestamp --entitlements "$ENTITLEMENTS" \
+    --sign "$MACOS_SIGN_IDENTITY" "$APP"
 else
-  codesign --force --sign - "$APP"
+  codesign --force --entitlements "$ENTITLEMENTS" --sign - "$APP"
 fi
 codesign --verify --strict "$APP"
 

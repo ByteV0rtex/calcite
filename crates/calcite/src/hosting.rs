@@ -68,6 +68,8 @@ pub struct Hosting {
     pub versions: Option<Vec<String>>,
     /// The last thing a stopped server said, for when it fails at once.
     pub last_exit: HashMap<PathBuf, SharedString>,
+    /// What adding voice chat to a server is doing, or how it went.
+    pub voice_status: HashMap<PathBuf, (SharedString, bool)>,
     events: UnboundedSender<Event>,
 }
 
@@ -88,6 +90,7 @@ impl Hosting {
             create_error: None,
             versions: None,
             last_exit: HashMap::new(),
+            voice_status: HashMap::new(),
             events,
         });
         cx.set_global(HostingHandle(hosting.clone()));
@@ -213,6 +216,38 @@ impl Hosting {
             let _ = server.accept_eula();
         }
         cx.notify();
+    }
+
+    /// Put Simple Voice Chat on a Fabric or Paper server.
+    pub fn add_voice_chat(&mut self, dir: &Path, cx: &mut Context<Self>) {
+        let Some(server) = self.server(dir).cloned() else {
+            return;
+        };
+        let dir = dir.to_path_buf();
+        self.voice_status
+            .insert(dir.clone(), ("Adding Simple Voice Chat…".into(), false));
+        cx.notify();
+        let task = Backend::global(cx)
+            .run(async move { local_server::add_voice_chat(&http_client()?, &server).await });
+        cx.spawn(async move |this, cx| {
+            let result = task.await.and_then(|r| r);
+            let _ = this.update(cx, |h, cx| {
+                let message = match result {
+                    Ok(_) if h.running.contains_key(&dir) => (
+                        "Simple Voice Chat added. Restart the server to turn it on.".into(),
+                        false,
+                    ),
+                    Ok(_) => (
+                        "Simple Voice Chat added. Players need it in their game too, and it uses UDP port 24454 next to the game port.".into(),
+                        false,
+                    ),
+                    Err(error) => (format!("Couldn't add voice chat: {error:#}").into(), true),
+                };
+                h.voice_status.insert(dir.clone(), message);
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     pub fn set_memory(&mut self, dir: &Path, memory_mb: u32, cx: &mut Context<Self>) {

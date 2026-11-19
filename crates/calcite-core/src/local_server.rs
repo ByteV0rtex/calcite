@@ -114,12 +114,169 @@ impl LocalServer {
         ]
     }
 
+    /// Where mods (Fabric) or plugins (Paper) go; Vanilla has neither.
+    pub fn addons_dir(&self) -> Option<PathBuf> {
+        match self.config.kind {
+            Kind::Vanilla => None,
+            Kind::Fabric => Some(self.dir.join("mods")),
+            Kind::Paper => Some(self.dir.join("plugins")),
+        }
+    }
+
+    /// Whether Simple Voice Chat is installed.
+    pub fn has_voice_chat(&self) -> bool {
+        self.addons_dir()
+            .and_then(|d| std::fs::read_dir(d).ok())
+            .is_some_and(|entries| {
+                entries.flatten().any(|e| {
+                    let name = e.file_name().to_string_lossy().to_ascii_lowercase();
+                    name.starts_with("voicechat") && name.ends_with(".jar")
+                })
+            })
+    }
+
+    /// The address friends on the same network join, if this computer has
+    /// one there.
+    pub fn lan_address(&self) -> Option<String> {
+        let ip = lan_ip()?;
+        Some(if self.config.port == 25565 {
+            ip.to_string()
+        } else {
+            format!("{ip}:{}", self.config.port)
+        })
+    }
+
     /// Set `server-port` (and keep everything else in server.properties).
     pub fn set_port(&mut self, port: u16) -> anyhow::Result<()> {
         self.config.port = port;
         set_property(&self.dir, "server-port", &port.to_string())?;
         self.save()
     }
+}
+
+/// This computer's address on the local network. Asks the system which
+/// interface it would use to reach the internet; nothing is sent.
+pub fn lan_ip() -> Option<std::net::IpAddr> {
+    let socket = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    socket.connect("192.0.2.1:9").ok()?;
+    let ip = socket.local_addr().ok()?.ip();
+    (!ip.is_loopback() && !ip.is_unspecified()).then_some(ip)
+}
+
+const MODRINTH: &str = "https://api.modrinth.com/v2";
+const VOICE_CHAT: &str = "simple-voice-chat";
+
+#[derive(Deserialize)]
+struct MrVersion {
+    name: String,
+    files: Vec<MrFile>,
+    #[serde(default)]
+    dependencies: Vec<MrDependency>,
+}
+
+#[derive(Deserialize)]
+struct MrFile {
+    url: String,
+    filename: String,
+    #[serde(default)]
+    primary: bool,
+    hashes: MrHashes,
+}
+
+#[derive(Deserialize)]
+struct MrHashes {
+    sha512: String,
+}
+
+#[derive(Deserialize)]
+struct MrDependency {
+    project_id: Option<String>,
+    dependency_type: String,
+}
+
+/// The newest version of a Modrinth project for this loader and game version.
+async fn modrinth_version(
+    http: &reqwest::Client,
+    project: &str,
+    loader: &str,
+    game_version: &str,
+) -> anyhow::Result<Option<MrVersion>> {
+    let versions: Vec<MrVersion> = http
+        .get(format!("{MODRINTH}/project/{project}/version"))
+        .query(&[
+            ("loaders", format!("[\"{loader}\"]")),
+            ("game_versions", format!("[\"{game_version}\"]")),
+        ])
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    Ok(versions.into_iter().next())
+}
+
+/// A version's main file, saved into `dir` after checking its SHA-512.
+async fn save_file(
+    http: &reqwest::Client,
+    version: &MrVersion,
+    dir: &Path,
+) -> anyhow::Result<String> {
+    let file = version
+        .files
+        .iter()
+        .find(|f| f.primary)
+        .or(version.files.first())
+        .ok_or_else(|| anyhow!("{} has no file to download", version.name))?;
+    let name = Path::new(&file.filename)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .filter(|n| !n.starts_with('.'))
+        .ok_or_else(|| anyhow!("odd file name {:?}", file.filename))?
+        .to_string();
+    let bytes = download(http, &file.url).await?;
+    check_sha512(&bytes, &file.hashes.sha512)?;
+    std::fs::create_dir_all(dir)?;
+    std::fs::write(dir.join(&name), bytes)?;
+    Ok(name)
+}
+
+/// Put Simple Voice Chat (and anything it needs) on a Fabric or Paper
+/// server. Returns the files added. Players need the mod too, and it uses
+/// UDP port 24454 next to the game port.
+pub async fn add_voice_chat(
+    http: &reqwest::Client,
+    server: &LocalServer,
+) -> anyhow::Result<Vec<String>> {
+    let dir = server.addons_dir().ok_or_else(|| {
+        anyhow!("Vanilla servers can't run mods. Make a Fabric or Paper server for voice chat.")
+    })?;
+    let loader = match server.config.kind {
+        Kind::Paper => "paper",
+        _ => "fabric",
+    };
+    let version = &server.config.game_version;
+    let voice = modrinth_version(http, VOICE_CHAT, loader, version)
+        .await?
+        .ok_or_else(|| {
+            anyhow!(
+                "Simple Voice Chat isn't out for {} {version} yet.",
+                server.config.kind.label()
+            )
+        })?;
+    let mut added = vec![save_file(http, &voice, &dir).await?];
+    for dependency in voice
+        .dependencies
+        .iter()
+        .filter(|d| d.dependency_type == "required")
+    {
+        let Some(project) = &dependency.project_id else {
+            continue;
+        };
+        if let Some(needed) = modrinth_version(http, project, loader, version).await? {
+            added.push(save_file(http, &needed, &dir).await?);
+        }
+    }
+    Ok(added)
 }
 
 pub fn root(data_dir: &Path) -> PathBuf {
@@ -349,6 +506,15 @@ fn check_sha1(bytes: &[u8], expected: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn check_sha512(bytes: &[u8], expected: &str) -> anyhow::Result<()> {
+    use sha2::Digest as _;
+    let got = hex(&sha2::Sha512::digest(bytes));
+    if !got.eq_ignore_ascii_case(expected) {
+        bail!("The download was damaged (checksum mismatch). Try again.");
+    }
+    Ok(())
+}
+
 fn check_sha256(bytes: &[u8], expected: &str) -> anyhow::Result<()> {
     use sha2::Digest as _;
     let got = hex(&sha2::Sha256::digest(bytes));
@@ -547,6 +713,44 @@ mod tests {
         assert_eq!(free_dir(root.path(), "New").file_name().unwrap(), "New (2)");
         assert_eq!(free_dir(root.path(), "a/b:c").file_name().unwrap(), "a-b-c");
         assert_eq!(free_dir(root.path(), "..").file_name().unwrap(), "Server");
+    }
+
+    #[test]
+    fn voice_chat_is_seen_in_mods_or_plugins() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = server(dir.path());
+        assert_eq!(s.addons_dir(), None, "vanilla has no mods");
+        assert!(!s.has_voice_chat());
+        s.config.kind = Kind::Fabric;
+        std::fs::create_dir_all(dir.path().join("mods")).unwrap();
+        std::fs::write(dir.path().join("mods/fabric-api.jar"), b"x").unwrap();
+        assert!(!s.has_voice_chat());
+        std::fs::write(
+            dir.path().join("mods/voicechat-fabric-2.6.27+26.3.jar"),
+            b"x",
+        )
+        .unwrap();
+        assert!(s.has_voice_chat());
+        s.config.kind = Kind::Paper;
+        assert!(!s.has_voice_chat(), "Paper looks in plugins");
+    }
+
+    /// `cargo test -p calcite-core voice_chat_live -- --ignored`
+    #[tokio::test]
+    #[ignore = "needs the network"]
+    async fn voice_chat_live_install() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = server(dir.path());
+        s.config.kind = Kind::Fabric;
+        s.config.game_version = "1.21.4".into();
+        let http = reqwest::Client::builder()
+            .user_agent("calcite-tests")
+            .build()
+            .unwrap();
+        let added = add_voice_chat(&http, &s).await.unwrap();
+        println!("added: {added:?}");
+        assert!(s.has_voice_chat());
     }
 
     #[test]

@@ -28,6 +28,15 @@
 	<true/>
 	<key>NSSupportsAutomaticGraphicsSwitching</key>
 	<true/>
+	<!-- macOS asks the player before Minecraft (started by Calcite) can use
+	     these. Without them it just says no: Simple Voice Chat hears nothing
+	     and LAN worlds and servers on the local network can't be reached. -->
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Minecraft mods like Simple Voice Chat use the microphone when you talk in game.</string>
+	<key>NSCameraUsageDescription</key>
+	<string>A Minecraft mod wants to use the camera.</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Minecraft uses the local network for LAN worlds, servers on your network and voice chat.</string>
 	<key>NSHumanReadableCopyright</key>
 	<string>Calcite is free software under the GPL-3.0.</string>
 	<key>CFBundleDocumentTypes</key>

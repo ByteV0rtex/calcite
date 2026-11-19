@@ -452,6 +452,7 @@ impl HostingPage {
             let address = address.clone();
             let entity = cx.entity().downgrade();
             let memory_mb = server.config.memory_mb;
+            let can_add_voice = server.config.kind != Kind::Vanilla && !server.has_voice_chat();
             KitButton::new("host-more")
                 .ghost()
                 .small()
@@ -469,9 +470,18 @@ impl HostingPage {
                         .item(
                             PopupMenuItem::new("Open folder")
                                 .on_click(move |_, _, cx| cx.open_with_system(&open)),
-                        )
-                        .separator()
-                        .label("Memory");
+                        );
+                    if can_add_voice {
+                        let (entity, dir) = (entity.clone(), dir.clone());
+                        menu = menu.item(PopupMenuItem::new("Add Simple Voice Chat").on_click(
+                            move |_, _, cx| {
+                                let _ = entity.update(cx, |this, cx| {
+                                    this.hosting.update(cx, |h, cx| h.add_voice_chat(&dir, cx))
+                                });
+                            },
+                        ));
+                    }
+                    menu = menu.separator().label("Memory");
                     for mb in MEMORY_CHOICES {
                         let (entity, dir) = (entity.clone(), dir.clone());
                         menu = menu.item(
@@ -524,7 +534,7 @@ impl HostingPage {
                             .text_size(px(type_scale::SMALL))
                             .text_color(p.text_muted)
                             .child(format!(
-                                "{} {}{} · {} GB · join at {address}",
+                                "{} {}{} · {} GB · join at {address}{}{}",
                                 server.config.kind.label(),
                                 server.config.game_version,
                                 server
@@ -535,6 +545,15 @@ impl HostingPage {
                                     .map(|l| format!(" (loader {l})"))
                                     .unwrap_or_default(),
                                 server.config.memory_mb / 1024,
+                                server
+                                    .lan_address()
+                                    .map(|lan| format!(", friends on your network at {lan}"))
+                                    .unwrap_or_default(),
+                                if server.has_voice_chat() {
+                                    " · voice chat on"
+                                } else {
+                                    ""
+                                },
                             )),
                     ),
             )
@@ -636,6 +655,21 @@ impl HostingPage {
                 )
         });
 
+        let voice = hosting
+            .voice_status
+            .get(&server.dir)
+            .cloned()
+            .map(|(message, is_error)| {
+                div()
+                    .p(space(3.0))
+                    .rounded(px(radius::MD))
+                    .bg(if is_error { p.danger_soft } else { p.surface })
+                    .border_1()
+                    .border_color(if is_error { p.danger_soft } else { p.border })
+                    .text_size(px(type_scale::SMALL))
+                    .text_color(p.text)
+                    .child(message)
+            });
         let notice = last_exit.filter(|_| state.is_none()).map(|message| {
             div()
                 .p(space(3.0))
@@ -723,6 +757,7 @@ impl HostingPage {
             .child(header)
             .children(delete_bar)
             .children(eula_card)
+            .children(voice)
             .children(notice)
             .children(players_row)
             .child(
