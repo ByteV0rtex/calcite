@@ -252,7 +252,10 @@ impl Shell {
             downloads_open: false,
             all_friends: false,
             user_page: None,
-            onboarding_step: (!cx.global::<crate::prefs::Prefs>().onboarding_done).then_some(0),
+            // The 9/IB edition has nothing to set up: it opens on its screen.
+            onboarding_step: (!crate::ibsmp::EDITION
+                && !cx.global::<crate::prefs::Prefs>().onboarding_done)
+                .then_some(0),
             _subscriptions: subscriptions,
         };
         shell.set_route(start, window, cx);
@@ -473,6 +476,18 @@ impl Shell {
             }
         }
         self.onboarding_step = Some(step.min(crate::ui::onboarding::STEPS.len() - 1));
+        cx.notify();
+    }
+
+    /// Switch the window to the 9/IB SMP screen, or back to the full launcher.
+    pub fn set_ibsmp_mode(&mut self, on: bool, _window: &mut Window, cx: &mut Context<Self>) {
+        let prefs = cx.global_mut::<crate::prefs::Prefs>();
+        prefs.ibsmp_mode = on;
+        prefs.save();
+        self.palette = None;
+        if on {
+            self.state.update(cx, |s, cx| s.ibsmp_refresh(cx));
+        }
         cx.notify();
     }
 
@@ -1207,7 +1222,35 @@ impl Shell {
             .children(self.update_card(cx))
             .children(self.download_card(cx))
             .when(self.account_menu_open, |d| d.child(self.account_menu(cx)))
+            .child(self.ibsmp_switch(cx))
             .child(self.account_row(cx))
+    }
+
+    /// "Switch to 9/IB mode": the window becomes the 9/IB SMP play screen.
+    fn ibsmp_switch(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let p = cx.palette().clone();
+        div()
+            .id("nav-ibsmp")
+            .mx(space(2.0))
+            .mb(space(1.0))
+            .flex()
+            .items_center()
+            .gap(space(2.5))
+            .h(px(30.0))
+            .px(space(2.5))
+            .rounded(px(radius::SM))
+            .text_size(px(type_scale::BODY))
+            .font_weight(FontWeight::MEDIUM)
+            .text_color(p.text_secondary)
+            .cursor_pointer()
+            .hover(|s| s.bg(p.hover).text_color(p.text))
+            .on_click(
+                cx.listener(|this, _: &ClickEvent, window, cx| {
+                    this.set_ibsmp_mode(true, window, cx)
+                }),
+            )
+            .child(icon("gamepad-2", 16.0, p.accent))
+            .child("Switch to 9/IB mode")
     }
 
     fn update_card(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
@@ -1682,6 +1725,9 @@ impl Shell {
             let move_in = self.move_in.clone();
             return crate::ui::onboarding::render(self, step, move_in, cx);
         }
+        if crate::ibsmp::active(cx) {
+            return crate::ui::pages::ibsmp::render(self, cx);
+        }
         match self.state.read(cx).status.clone() {
             BackendStatus::Starting
                 if !matches!(
@@ -1850,8 +1896,10 @@ impl Render for Shell {
         let p = cx.palette().clone();
         let page = self.page(window, cx);
         let notice = self.notice(cx);
-        // During onboarding the title bar only holds the window controls.
-        let title_bar = if self.onboarding_step.is_some() {
+        // During onboarding and in 9/IB mode the title bar only holds the
+        // window controls, and there is no sidebar.
+        let bare = self.onboarding_step.is_some() || crate::ibsmp::active(cx);
+        let title_bar = if bare {
             TitleBar::new()
                 .h(px(TITLE_BAR_HEIGHT))
                 .bg(p.app)
@@ -1887,9 +1935,7 @@ impl Render for Shell {
                     .flex()
                     .flex_1()
                     .min_h_0()
-                    .when(self.onboarding_step.is_none(), |d| {
-                        d.child(self.sidebar(cx))
-                    })
+                    .when(!bare, |d| d.child(self.sidebar(cx)))
                     .child(
                         div()
                             .flex_1()

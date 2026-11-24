@@ -12,6 +12,8 @@ path = "src/main.rs"
 [features]
 # Dev-only: `calcite --snapshot <page> <out.png>` renders a page to an image.
 snapshot = ["dep:gpui-pre", "dep:gpui-pre-platform"]
+# The 9/IB edition: opens straight into 9/IB mode, with its own name, icon and data folder.
+ibsmp = []
 
 [dependencies]
 gpui-kit = "=0.9.1"

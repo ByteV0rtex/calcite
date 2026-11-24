@@ -2,7 +2,8 @@
 #
 #   scripts\package-windows.ps1             # release build, then package
 #   scripts\package-windows.ps1 -SkipBuild
-param([switch]$SkipBuild)
+#   scripts\package-windows.ps1 -Edition ibsmp   # the 9/IB SMP edition (installer only)
+param([switch]$SkipBuild, [string]$Edition = 'calcite')
 $ErrorActionPreference = 'Stop'
 Set-Location (Join-Path $PSScriptRoot '..')
 
@@ -16,12 +17,28 @@ if (-not $env:CALCITE_CURSEFORGE_KEY -and (Test-Path .curseforge-key)) {
 }
 if (-not $SkipBuild) {
     # The app and its sign-in helper (Microsoft's page in a web view).
-    cargo build --release -p calcite -p calcite-login
+    if ($Edition -eq 'ibsmp') {
+        cargo build --release -p calcite -p calcite-login --features calcite/ibsmp
+    } else {
+        cargo build --release -p calcite -p calcite-login
+    }
     if ($LASTEXITCODE) { exit $LASTEXITCODE }
 }
 $bin = (Resolve-Path (Join-Path $target 'release\calcite.exe')).Path
 $login = (Resolve-Path (Join-Path $target 'release\calcite-login.exe')).Path
 New-Item -ItemType Directory -Force dist | Out-Null
+
+# The 9/IB edition: just its installer.
+if ($Edition -eq 'ibsmp') {
+    $iscc = Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6\ISCC.exe'
+    if (-not (Test-Path $iscc)) {
+        choco install innosetup -y --no-progress | Out-Null
+    }
+    & $iscc /Q "/DAppVersion=$version" "/DBinary=$bin" "/DLoginBinary=$login" packaging\ibsmp\ibsmp.iss
+    if ($LASTEXITCODE) { exit $LASTEXITCODE }
+    Get-ChildItem dist | ForEach-Object { $_.FullName }
+    exit 0
+}
 
 # Portable: portable.txt beside the exe keeps all data in .\data.
 $stage = Join-Path ([IO.Path]::GetTempPath()) 'calcite-portable'

@@ -191,6 +191,24 @@ jobs:
           if (-not (Test-Path "$portable\data\calcite.log")) { throw 'portable mode did not keep its data next to calcite.exe' }
           Stop-Process -Id $app.Id
 
+      # The 9/IB SMP edition: the same code built with --features ibsmp, with
+      # its own name, icon and installers. Built last, after Calcite's own
+      # installers were packaged and tried, because it rebuilds the binaries.
+      - name: 9/IB edition (macOS .dmg)
+        if: runner.os == 'macOS' && ((github.event_name == 'workflow_dispatch' && inputs.release) || startsWith(github.ref, 'refs/tags/'))
+        env:
+          CALCITE_CURSEFORGE_KEY: ${{ secrets.CALCITE_CURSEFORGE_KEY }}
+        run: |
+          EDITION=ibsmp scripts/package-macos.sh
+          "dist/9IB SMP.app/Contents/MacOS/calcite" help
+
+      - name: 9/IB edition (Windows installer)
+        if: runner.os == 'Windows' && ((github.event_name == 'workflow_dispatch' && inputs.release) || startsWith(github.ref, 'refs/tags/'))
+        shell: pwsh
+        env:
+          CALCITE_CURSEFORGE_KEY: ${{ secrets.CALCITE_CURSEFORGE_KEY }}
+        run: scripts/package-windows.ps1 -Edition ibsmp
+
       - uses: actions/upload-artifact@v4
         if: (github.event_name == 'workflow_dispatch' && inputs.release) || startsWith(github.ref, 'refs/tags/')
         with:

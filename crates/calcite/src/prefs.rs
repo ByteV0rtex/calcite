@@ -28,6 +28,11 @@ pub struct Prefs {
     pub notify_when_away: bool,
     /// Instance tabs the player hid (by label).
     pub hidden_tabs: Vec<String>,
+    /// 9/IB mode: the window is only the 9/IB SMP play screen.
+    pub ibsmp_mode: bool,
+    /// The instance kept for 9/IB SMP, and the pack version it has.
+    pub ibsmp_instance: Option<String>,
+    pub ibsmp_pack_version: Option<String>,
 }
 
 /// The page Calcite opens on.
@@ -54,6 +59,9 @@ impl Default for Prefs {
             check_updates: true,
             notify_when_away: false,
             hidden_tabs: Vec::new(),
+            ibsmp_mode: false,
+            ibsmp_instance: None,
+            ibsmp_pack_version: None,
         }
     }
 }
@@ -184,6 +192,9 @@ mod tests {
             check_updates: false,
             notify_when_away: true,
             hidden_tabs: vec!["Snapshots".into()],
+            ibsmp_mode: true,
+            ibsmp_instance: Some("abc".into()),
+            ibsmp_pack_version: Some("0.3-test".into()),
         };
         let json = serde_json::to_string(&prefs).unwrap();
         assert_eq!(serde_json::from_str::<Prefs>(&json).unwrap(), prefs);
@@ -194,5 +205,6 @@ mod tests {
         assert!(old.backup_worlds_on_exit, "backups default to on");
         assert!(old.check_updates, "update checks default to on");
         assert!(!old.notify_when_away, "notifications are opt-in");
+        assert!(!old.ibsmp_mode, "9/IB mode is opt-in in normal Calcite");
     }
 }

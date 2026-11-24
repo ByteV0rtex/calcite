@@ -269,6 +269,10 @@ pub struct AppState {
     /// Install jobs making an instance for a listed server: join it
     /// (name, address) once the install finishes.
     pending_joins: HashMap<String, (String, String)>,
+    /// 9/IB SMP mode (see `crate::ibsmp`).
+    pub ibsmp: IbSmp,
+    /// Install jobs for the 9/IB SMP instance: the pack version each installs.
+    pending_ibsmp: HashMap<String, String>,
     /// Bumped whenever an instance's content changes, so open pages reload.
     pub content_revision: HashMap<String, u64>,
     /// Project ids being installed per instance (for "Installing…" buttons).
@@ -288,6 +292,29 @@ pub struct Notice {
     pub title: SharedString,
     pub body: SharedString,
     pub is_error: bool,
+}
+
+/// The 9/IB SMP screen: what the server said and what the play button is doing.
+#[derive(Clone, Debug, Default)]
+pub struct IbSmp {
+    pub manifest: Option<crate::ibsmp::Manifest>,
+    /// Players online and the limit; `None` if the server didn't answer.
+    pub players: Option<(i32, i32)>,
+    /// A status check has finished (tells "checking" from "offline").
+    pub checked: bool,
+    pub step: IbStep,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub enum IbStep {
+    #[default]
+    Idle,
+    /// Asking the server which pack it runs, and fetching the pack.
+    Preparing,
+    /// The install job (by id) that makes or updates the instance.
+    Installing(String),
+    /// The game was asked to start at this moment.
+    Starting(std::time::Instant),
 }
 
 /// The Modrinth account Calcite is signed in with.
@@ -363,6 +390,7 @@ impl AppState {
                     this.check_for_update(cx);
                     this.refresh_all(cx);
                     this.refresh_modrinth(cx);
+                    this.watch_ibsmp(cx);
                     cx.notify();
                 }
                 Err(error) => {
@@ -380,7 +408,7 @@ impl AppState {
 
     /// Ask GitHub for a newer release, unless the player turned that off.
     pub fn check_for_update(&mut self, cx: &mut Context<Self>) {
-        if !cx.global::<crate::prefs::Prefs>().check_updates {
+        if crate::ibsmp::EDITION || !cx.global::<crate::prefs::Prefs>().check_updates {
             return;
         }
         let task = Backend::global(cx).run(async {
@@ -433,6 +461,8 @@ impl AppState {
             update: None,
             pending_copies: HashMap::new(),
             pending_joins: HashMap::new(),
+            ibsmp: IbSmp::default(),
+            pending_ibsmp: HashMap::new(),
             content_revision: HashMap::new(),
             installing: HashMap::new(),
             modrinth: None,
@@ -549,6 +579,33 @@ impl AppState {
                     None => self.jobs.push(job.clone()),
                 }
                 if finished {
+                    // The 9/IB SMP instance is ready (or updated): remember it.
+                    if let Some(version) = self.pending_ibsmp.remove(&job.id) {
+                        match job.instance_id.clone().filter(|_| succeeded) {
+                            Some(instance_id) => {
+                                let prefs = cx.global_mut::<crate::prefs::Prefs>();
+                                prefs.ibsmp_instance = Some(instance_id.clone());
+                                prefs.ibsmp_pack_version = Some(version.clone());
+                                prefs.save();
+                                self.ibsmp.step = IbStep::Starting(std::time::Instant::now());
+                                let mark = Backend::global(cx).run(async move {
+                                    let dir = theseus::instance::get_full_path(&instance_id)
+                                        .await
+                                        .map_err(|e| anyhow::anyhow!("{e}"))?;
+                                    crate::ibsmp::write_marker(&dir, &version).await?;
+                                    anyhow::Ok(())
+                                });
+                                cx.background_executor()
+                                    .spawn(async move {
+                                        if let Err(error) = mark.await.and_then(|r| r) {
+                                            tracing::warn!("9/IB marker: {error:#}");
+                                        }
+                                    })
+                                    .detach();
+                            }
+                            None => self.ibsmp.step = IbStep::Idle,
+                        }
+                    }
                     if let Some((name, address)) = self.pending_joins.remove(&job.id)
                         && succeeded
                         && let Some(instance_id) = job.instance_id.clone()
@@ -623,6 +680,9 @@ impl AppState {
     ) {
         if self.running.contains_key(&instance_id) {
             return;
+        }
+        if matches!(self.ibsmp.step, IbStep::Starting(_)) {
+            self.ibsmp.step = IbStep::Idle;
         }
         self.running.insert(
             instance_id.clone(),
@@ -1568,10 +1628,211 @@ impl AppState {
         cx.spawn(async move |this, cx| {
             if let Err(error) = run.await {
                 let _ = this.update(cx, |this, cx| {
+                    if matches!(this.ibsmp.step, IbStep::Starting(_)) {
+                        this.ibsmp.step = IbStep::Idle;
+                    }
                     this.notify_error("Minecraft didn't start", format!("{error:#}"));
                     cx.notify();
                 });
             }
+        })
+        .detach();
+    }
+
+    // ------------------------------------------------------------ 9/IB SMP
+
+    /// Keep the 9/IB screen's player count fresh while it's showing.
+    fn watch_ibsmp(&mut self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            loop {
+                let alive = this.update(cx, |this, cx| {
+                    if crate::ibsmp::active(cx) {
+                        this.ibsmp_refresh(cx);
+                    }
+                });
+                if alive.is_err() {
+                    break;
+                }
+                cx.background_executor()
+                    .timer(Duration::from_secs(30))
+                    .await;
+            }
+        })
+        .detach();
+    }
+
+    /// The instance kept for 9/IB SMP, if it's still there.
+    pub fn ibsmp_instance(&self, cx: &App) -> Option<String> {
+        let id = cx.global::<crate::prefs::Prefs>().ibsmp_instance.clone()?;
+        self.instances.iter().any(|i| i.id == id).then_some(id)
+    }
+
+    /// Ask the server for its manifest and how many people are on.
+    pub fn ibsmp_refresh(&mut self, cx: &mut Context<Self>) {
+        let task = Backend::global(cx).run(async move {
+            let manifest = crate::ibsmp::fetch_manifest().await;
+            if let Err(error) = &manifest {
+                tracing::debug!("9/IB manifest: {error:#}");
+            }
+            let address = manifest
+                .as_ref()
+                .map(|m| m.address.clone())
+                .unwrap_or_else(|_| crate::ibsmp::DEFAULT_ADDRESS.to_string());
+            let players = theseus::worlds::get_server_status(&address, None)
+                .await
+                .ok()
+                .and_then(|status| status.players)
+                .map(|p| (p.online, p.max));
+            (manifest.ok(), players)
+        });
+        cx.spawn(async move |this, cx| {
+            let Ok((manifest, players)) = task.await else {
+                return;
+            };
+            let _ = this.update(cx, |this, cx| {
+                if manifest.is_some() {
+                    this.ibsmp.manifest = manifest;
+                }
+                this.ibsmp.players = players;
+                this.ibsmp.checked = true;
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// The play button: make or update the instance from the server's pack
+    /// if needed, then start the game straight into the server.
+    pub fn ibsmp_play(&mut self, cx: &mut Context<Self>) {
+        if self.accounts.is_empty() {
+            self.notice = Some(Notice {
+                title: "Önce giriş yap".into(),
+                body: "Microsoft hesabınla giriş yap, sonra Oyna'ya bas.".into(),
+                is_error: false,
+            });
+            cx.notify();
+            return;
+        }
+        if self.ibsmp.step != IbStep::Idle {
+            return;
+        }
+        self.ibsmp.step = IbStep::Preparing;
+        cx.notify();
+        let have = self.ibsmp_instance(cx);
+        let have_version = cx
+            .global::<crate::prefs::Prefs>()
+            .ibsmp_pack_version
+            .clone();
+        // Without a record of it, look for the 9/IB marker in every instance
+        // (installed before, by this Calcite or the 9/IB edition).
+        let candidates: Vec<String> = if have.is_none() {
+            self.instances.iter().map(|i| i.id.clone()).collect()
+        } else {
+            Vec::new()
+        };
+        let dir = crate::backend::data_dir()
+            .map(|d| d.join("9ib"))
+            .unwrap_or_else(std::env::temp_dir);
+        enum Next {
+            Join(String, crate::ibsmp::Manifest),
+            Install(crate::ibsmp::Manifest, PathBuf, Option<String>),
+        }
+        let task = Backend::global(cx).run(async move {
+            let manifest = crate::ibsmp::fetch_manifest().await?;
+            let (mut have, mut have_version) = (have, have_version);
+            for id in candidates {
+                if let Ok(dir) = theseus::instance::get_full_path(&id).await
+                    && let Some(version) = crate::ibsmp::read_marker(&dir).await
+                {
+                    have = Some(id);
+                    have_version = Some(version);
+                    break;
+                }
+            }
+            if let Some(id) = have.clone()
+                && have_version.as_deref() == Some(manifest.pack.version.as_str())
+            {
+                return anyhow::Ok(Next::Join(id, manifest));
+            }
+            let path = crate::ibsmp::download_pack(&manifest.pack, &dir).await?;
+            Ok(Next::Install(manifest, path, have))
+        });
+        cx.spawn(async move |this, cx| {
+            let result = task.await.and_then(|r| r);
+            let _ = this.update(cx, |this, cx| {
+                match result {
+                    Ok(Next::Join(id, manifest)) => {
+                        let (name, address) = (manifest.title(), manifest.address.clone());
+                        // Remember it (it may have just been found by its marker).
+                        let prefs = cx.global_mut::<crate::prefs::Prefs>();
+                        if prefs.ibsmp_instance.as_deref() != Some(id.as_str()) {
+                            prefs.ibsmp_instance = Some(id.clone());
+                            prefs.ibsmp_pack_version = Some(manifest.pack.version.clone());
+                            prefs.save();
+                        }
+                        this.ibsmp.manifest = Some(manifest);
+                        this.ibsmp.step = IbStep::Starting(std::time::Instant::now());
+                        this.add_server_and_join(id, name, address, cx);
+                    }
+                    Ok(Next::Install(manifest, path, existing)) => {
+                        this.ibsmp_install(manifest, path, existing, cx)
+                    }
+                    Err(error) => {
+                        this.ibsmp.step = IbStep::Idle;
+                        this.notify_error("9/IB SMP hazırlanamadı", format!("{error:#}"));
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Make the 9/IB SMP instance from the pack, or put the newer pack into
+    /// the one there is. The join and the saved version follow when it's done.
+    fn ibsmp_install(
+        &mut self,
+        manifest: crate::ibsmp::Manifest,
+        path: PathBuf,
+        existing: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let edit = theseus::install::InstallPostInstallEdit {
+            name: Some(manifest.title()),
+            icon_path: None,
+            link: None,
+        };
+        let location = theseus::pack::install_from::CreatePackLocation::FromFile { path };
+        let start = Backend::global(cx).call(async move {
+            match existing {
+                Some(id) => {
+                    theseus::install::install_pack_to_existing_instance(id, location, Some(edit))
+                        .await
+                }
+                None => theseus::install::create_modpack_instance(location, Some(edit)).await,
+            }
+        });
+        cx.spawn(async move |this, cx| {
+            let result = start.await;
+            let _ = this.update(cx, |this, cx| {
+                match result {
+                    Ok(job) => {
+                        let id = job.job_id.clone();
+                        this.pending_joins
+                            .insert(id.clone(), (manifest.title(), manifest.address.clone()));
+                        this.pending_ibsmp
+                            .insert(id.clone(), manifest.pack.version.clone());
+                        this.ibsmp.step = IbStep::Installing(id);
+                        this.ibsmp.manifest = Some(manifest);
+                        this.track_job(job, cx);
+                    }
+                    Err(error) => {
+                        this.ibsmp.step = IbStep::Idle;
+                        this.notify_error("9/IB SMP kurulamadı", format!("{error:#}"));
+                    }
+                }
+                cx.notify();
+            });
         })
         .detach();
     }

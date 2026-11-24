@@ -22,6 +22,8 @@ pub fn data_id() -> String {
     {
         return id;
     }
+    // The 9/IB edition shares Calcite's folder on purpose: a 9/IB instance
+    // made in either one is found by the other, never downloaded twice.
     if cfg!(debug_assertions) {
         "CalciteDev".into()
     } else {

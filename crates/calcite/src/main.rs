@@ -7,6 +7,7 @@ mod assets;
 mod backend;
 mod cli;
 mod hosting;
+mod ibsmp;
 mod images;
 mod login;
 mod modrinth_login;
@@ -138,6 +139,8 @@ fn main() {
         if snapshot.is_some() {
             // Snapshots pick their look explicitly.
             saved.follow_system = false;
+            // `--snapshot ibsmp` shows the 9/IB screen (never saved: snapshots don't save prefs).
+            saved.ibsmp_mode = snapshot.as_ref().is_some_and(|s| s.0 == "ibsmp");
         }
         cx.set_global(saved);
         prefs::Prefs::apply_current(cx);
@@ -160,11 +163,25 @@ fn main() {
         })
         .detach();
 
-        let bounds = Bounds::centered(None, size(px(1280.0), px(820.0)), cx);
+        // The 9/IB edition is one screen: a smaller window is enough.
+        let (start_size, min_size, app_id) = if ibsmp::EDITION {
+            (
+                size(px(880.0), px(660.0)),
+                size(px(640.0), px(600.0)),
+                "com.bytev0rtex.ibsmp",
+            )
+        } else {
+            (
+                size(px(1280.0), px(820.0)),
+                size(px(960.0), px(600.0)),
+                "com.calcite.launcher",
+            )
+        };
+        let bounds = Bounds::centered(None, start_size, cx);
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
-            window_min_size: Some(size(px(960.0), px(600.0))),
-            app_id: Some("com.calcite.launcher".into()),
+            window_min_size: Some(min_size),
+            app_id: Some(app_id.into()),
             titlebar: Some(gpui_kit::TitlebarOptions {
                 // Centre the traffic lights on Calcite's 40px title bar.
                 traffic_light_position: Some(gpui_kit::point(px(13.0), px(13.0))),
@@ -174,7 +191,11 @@ fn main() {
         };
         let window = cx
             .open_window(options, |window, cx| {
-                window.set_window_title("Calcite");
+                window.set_window_title(if ibsmp::EDITION {
+                    "9/IB SMP"
+                } else {
+                    "Calcite"
+                });
                 // Follow the system's light and dark when asked to.
                 window
                     .observe_window_appearance(|_, cx| {
