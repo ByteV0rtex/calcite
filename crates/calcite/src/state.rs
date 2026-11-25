@@ -408,7 +408,9 @@ impl AppState {
 
     /// Ask GitHub for a newer release, unless the player turned that off.
     pub fn check_for_update(&mut self, cx: &mut Context<Self>) {
-        if crate::ibsmp::EDITION || !cx.global::<crate::prefs::Prefs>().check_updates {
+        // The 9/IB edition checks too (it has no setting for it): its
+        // installers ship in the same GitHub release as Calcite's.
+        if !crate::ibsmp::EDITION && !cx.global::<crate::prefs::Prefs>().check_updates {
             return;
         }
         let task = Backend::global(cx).run(async {
@@ -1646,15 +1648,18 @@ impl AppState {
 
     // ------------------------------------------------------------ 9/IB SMP
 
-    /// Keep the 9/IB screen's player count fresh while it's showing.
+    /// Keep the 9/IB player count and pack version fresh: every 30 seconds
+    /// on the 9/IB screen, every 2 minutes for the card on the home page.
     fn watch_ibsmp(&mut self, cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
+            let mut round: u32 = 0;
             loop {
                 let alive = this.update(cx, |this, cx| {
-                    if crate::ibsmp::active(cx) {
+                    if crate::ibsmp::active(cx) || round.is_multiple_of(4) {
                         this.ibsmp_refresh(cx);
                     }
                 });
+                round = round.wrapping_add(1);
                 if alive.is_err() {
                     break;
                 }

@@ -131,6 +131,20 @@ pub async fn download_pack(pack: &Pack, dir: &Path) -> anyhow::Result<PathBuf> {
     Ok(path)
 }
 
+/// Where the edition's update button points: this computer's 9/IB installer
+/// in the GitHub release (CI names them like this), or the release page when
+/// there is no installer for this system.
+pub fn installer_url(version: &str, release_page: &str) -> String {
+    let base = "https://github.com/ByteV0rtex/calcite/releases/download";
+    match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("windows", "x86_64") => {
+            format!("{base}/v{version}/9IB-SMP-{version}-windows-x64-setup.exe")
+        }
+        ("macos", "aarch64") => format!("{base}/v{version}/9IB-SMP-{version}-macos-arm64.dmg"),
+        _ => release_page.to_string(),
+    }
+}
+
 /// How much memory the 9/IB pack gets: half the computer's, between 3 and
 /// 6 GB. The launcher's default (2 GB) is too little for Create, the guns
 /// and 40-odd other mods, and the game stutters or runs out of memory.

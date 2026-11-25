@@ -11,6 +11,8 @@ use crate::ui::shell::{Route, Shell, instance_icon};
 
 pub fn render(shell: &mut Shell, window: &mut Window, cx: &mut Context<Shell>) -> AnyElement {
     let p = cx.palette().clone();
+    // 9/IB SMP first: join from here without switching to 9/IB mode.
+    let ibsmp_card = crate::ui::pages::ibsmp::home_card(shell, cx);
     let state = shell.state().read(cx);
     let instances = state.instances.clone();
     let running = state.running.clone();
@@ -29,6 +31,7 @@ pub fn render(shell: &mut Shell, window: &mut Window, cx: &mut Context<Shell>) -
             .gap(space(8.0))
             .px(space(8.0))
             .py(space(7.0))
+            .child(div().w_full().max_w(px(1120.0)).child(ibsmp_card))
             .child(empty_state(
                 "house",
                 "Welcome to Calcite",
@@ -289,6 +292,7 @@ pub fn render(shell: &mut Shell, window: &mut Window, cx: &mut Context<Shell>) -
                 .px(space(8.0))
                 .py(space(7.0))
                 .max_w(px(1120.0))
+                .child(ibsmp_card)
                 .child(
                     div()
                         .flex()

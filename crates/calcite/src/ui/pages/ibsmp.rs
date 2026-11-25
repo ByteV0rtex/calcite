@@ -27,12 +27,11 @@ enum Play {
     Playing,
 }
 
-pub fn render(shell: &mut Shell, cx: &mut Context<Shell>) -> AnyElement {
-    let p = cx.palette().clone();
+/// What the play button shows right now, and the 9/IB instance if there is
+/// one. Shared by the 9/IB screen and the card on Calcite's home page.
+fn current_play(shell: &Shell, cx: &Context<Shell>) -> (Play, Option<String>) {
     let state = shell.state().read(cx);
-    let account = state.active_account().cloned();
-    let face = account.as_ref().and_then(|a| state.face_for(a.id));
-    let ib = state.ibsmp.clone();
+    let ib = &state.ibsmp;
     let instance = state.ibsmp_instance(cx);
     let running = instance
         .as_ref()
@@ -45,21 +44,13 @@ pub fn render(shell: &mut Shell, cx: &mut Context<Shell>) -> AnyElement {
         .global::<crate::prefs::Prefs>()
         .ibsmp_pack_version
         .clone();
-
-    let (name, season) = ib
-        .manifest
-        .as_ref()
-        .map(|m| (m.name.clone(), m.season.clone()))
-        .unwrap_or_else(|| (DEFAULT_NAME.to_string(), DEFAULT_SEASON.to_string()));
-    let news = ib.manifest.as_ref().and_then(|m| m.news.clone());
     let update = match (&ib.manifest, &have_version) {
         (Some(m), Some(v)) => instance.is_some() && m.pack.version != *v,
         _ => false,
     };
-
     let play = if running {
         Play::Playing
-    } else if account.is_none() {
+    } else if state.active_account().is_none() {
         Play::SignIn
     } else {
         match &ib.step {
@@ -79,6 +70,178 @@ pub fn render(shell: &mut Shell, cx: &mut Context<Shell>) -> AnyElement {
             },
         }
     };
+    (play, instance)
+}
+
+/// The server's status as a coloured dot and a line.
+fn server_status(shell: &Shell, cx: &Context<Shell>) -> (Hsla, String) {
+    let p = cx.palette().clone();
+    let ib = &shell.state().read(cx).ibsmp;
+    match (ib.checked, ib.players) {
+        (_, Some((online, max))) => (
+            p.running,
+            if online == 0 {
+                format!("Sunucu açık · şu an kimse yok (en fazla {max})")
+            } else {
+                format!("Sunucu açık · {online}/{max} oyuncu")
+            },
+        ),
+        (false, None) => (p.text_muted, "Sunucuya bakılıyor…".into()),
+        (true, None) => (p.danger, "Sunucuya şu an ulaşılamıyor".into()),
+    }
+}
+
+/// Under the button: the install progress, or a word about what will happen.
+fn below_button(play: &Play, cx: &mut Context<Shell>) -> Option<AnyElement> {
+    let p = cx.palette().clone();
+    match play {
+        Play::Installing { fraction, phase } => Some(
+            div()
+                .w_full()
+                .flex()
+                .flex_col()
+                .gap(space(1.5))
+                .child(progress_bar(*fraction, cx))
+                .child(
+                    div()
+                        .text_size(px(type_scale::SMALL))
+                        .text_color(p.text_muted)
+                        .child(install_phase(phase)),
+                )
+                .into_any_element(),
+        ),
+        Play::Ready {
+            first_time: true, ..
+        } => Some(hint(
+            "İlk seferde modlar indirilir (yaklaşık 250 MB). Sonra direkt açılır.",
+            cx,
+        )),
+        Play::Ready { update: true, .. } => Some(hint(
+            "Sunucunun yeni paketi var: sadece değişenler güncellenir, dünyaların ve ayarların kalır.",
+            cx,
+        )),
+        _ => None,
+    }
+}
+
+/// The 9/IB SMP card at the top of Calcite's home page: the same button as
+/// the 9/IB screen (install, update, join), without switching to 9/IB mode.
+pub fn home_card(shell: &mut Shell, cx: &mut Context<Shell>) -> AnyElement {
+    let p = cx.palette().clone();
+    let (play, instance) = current_play(shell, cx);
+    let (dot, status) = server_status(shell, cx);
+    let ib = shell.state().read(cx).ibsmp.clone();
+    let (name, season) = ib
+        .manifest
+        .as_ref()
+        .map(|m| (m.name.clone(), m.season.clone()))
+        .unwrap_or_else(|| (DEFAULT_NAME.to_string(), DEFAULT_SEASON.to_string()));
+    let news = ib.manifest.as_ref().and_then(|m| m.news.clone());
+    let button = play_button(&play, instance, 48.0, cx);
+    let below = below_button(&play, cx);
+
+    div()
+        .id("home-ibsmp")
+        .w_full()
+        .p(space(5.0))
+        .rounded(px(radius::LG))
+        .bg(p.surface)
+        .border_1()
+        .border_color(p.border)
+        .flex()
+        .items_center()
+        .gap(space(6.0))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .gap(space(2.0))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(space(2.5))
+                        .child(
+                            div()
+                                .text_size(px(26.0))
+                                .font_weight(FontWeight::BOLD)
+                                .text_color(p.accent)
+                                .child(name),
+                        )
+                        .child(
+                            div()
+                                .px(space(2.5))
+                                .py(space(0.5))
+                                .rounded_full()
+                                .bg(p.accent_soft)
+                                .text_size(px(type_scale::SMALL))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(p.accent_text)
+                                .child(season),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(space(2.0))
+                        .text_size(px(type_scale::BODY))
+                        .text_color(p.text_secondary)
+                        .child(div().size(px(8.0)).rounded_full().bg(dot))
+                        .child(status),
+                )
+                .when_some(news, |d, news| {
+                    d.child(
+                        div()
+                            .text_size(px(type_scale::SMALL))
+                            .text_color(p.text_muted)
+                            .child(news),
+                    )
+                })
+                .child(
+                    div().pt(space(1.0)).flex().child(
+                        Button::new("home-ibsmp-mode")
+                            .icon("gamepad-2")
+                            .label("9/IB ekranına geç")
+                            .ghost()
+                            .small()
+                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                                this.set_ibsmp_mode(true, window, cx)
+                            })),
+                    ),
+                ),
+        )
+        .child(
+            div()
+                .w(px(320.0))
+                .flex_none()
+                .flex()
+                .flex_col()
+                .gap(space(2.0))
+                .child(button)
+                .children(below),
+        )
+        .into_any_element()
+}
+
+pub fn render(shell: &mut Shell, cx: &mut Context<Shell>) -> AnyElement {
+    let p = cx.palette().clone();
+    let (play, instance) = current_play(shell, cx);
+    let (dot, status) = server_status(shell, cx);
+    let state = shell.state().read(cx);
+    let account = state.active_account().cloned();
+    let face = account.as_ref().and_then(|a| state.face_for(a.id));
+    let ib = state.ibsmp.clone();
+    let app_update = state.update.clone();
+
+    let (name, season) = ib
+        .manifest
+        .as_ref()
+        .map(|m| (m.name.clone(), m.season.clone()))
+        .unwrap_or_else(|| (DEFAULT_NAME.to_string(), DEFAULT_SEASON.to_string()));
+    let news = ib.manifest.as_ref().and_then(|m| m.news.clone());
 
     // "9/IB" big, "SMP" beside it, the season under it.
     let (big, rest) = name
@@ -124,19 +287,6 @@ pub fn render(shell: &mut Shell, cx: &mut Context<Shell>) -> AnyElement {
                 .child(season),
         );
 
-    // Server status: a dot and a line.
-    let (dot, status): (Hsla, String) = match (ib.checked, ib.players) {
-        (_, Some((online, max))) => (
-            p.running,
-            if online == 0 {
-                format!("Sunucu açık · şu an kimse yok (en fazla {max})")
-            } else {
-                format!("Sunucu açık · {online}/{max} oyuncu")
-            },
-        ),
-        (false, None) => (p.text_muted, "Sunucuya bakılıyor…".into()),
-        (true, None) => (p.danger, "Sunucuya şu an ulaşılamıyor".into()),
-    };
     let status_line = div()
         .flex()
         .items_center()
@@ -146,35 +296,8 @@ pub fn render(shell: &mut Shell, cx: &mut Context<Shell>) -> AnyElement {
         .child(div().size(px(8.0)).rounded_full().bg(dot))
         .child(status);
 
-    let button = play_button(&play, instance.clone(), cx);
-    let below: Option<AnyElement> = match &play {
-        Play::Installing { fraction, phase } => Some(
-            div()
-                .w_full()
-                .flex()
-                .flex_col()
-                .gap(space(1.5))
-                .child(progress_bar(*fraction, cx))
-                .child(
-                    div()
-                        .text_size(px(type_scale::SMALL))
-                        .text_color(p.text_muted)
-                        .child(install_phase(phase)),
-                )
-                .into_any_element(),
-        ),
-        Play::Ready {
-            first_time: true, ..
-        } => Some(hint(
-            "İlk seferde modlar indirilir (yaklaşık 250 MB). Sonra direkt açılır.",
-            cx,
-        )),
-        Play::Ready { update: true, .. } => Some(hint(
-            "Sunucunun yeni paketi var: sadece değişenler güncellenir, dünyaların ve ayarların kalır.",
-            cx,
-        )),
-        _ => None,
-    };
+    let button = play_button(&play, instance.clone(), 56.0, cx);
+    let below = below_button(&play, cx);
 
     let account_row = match &account {
         Some(a) => div()
@@ -256,6 +379,9 @@ pub fn render(shell: &mut Shell, cx: &mut Context<Shell>) -> AnyElement {
                 .flex_col()
                 .items_center()
                 .gap(space(5.0))
+                .when_some(app_update, |d, update| {
+                    d.child(app_update_banner(update, cx))
+                })
                 .child(rise_slow(logo, "ibsmp-logo", 0, 14.0))
                 .child(status_line)
                 .when_some(news, |d, news| {
@@ -293,8 +419,65 @@ pub fn render(shell: &mut Shell, cx: &mut Context<Shell>) -> AnyElement {
         .into_any_element()
 }
 
+/// "A new version of the app is out": in the edition it downloads this
+/// computer's 9/IB installer, in Calcite's 9/IB mode it opens the release.
+fn app_update_banner(update: calcite_core::updates::Update, cx: &mut Context<Shell>) -> AnyElement {
+    let p = cx.palette().clone();
+    let url = if EDITION {
+        crate::ibsmp::installer_url(&update.version, &update.url)
+    } else {
+        update.url.clone()
+    };
+    let what = if EDITION { "9/IB SMP" } else { "Calcite" };
+    div()
+        .id("ibsmp-app-update")
+        .w_full()
+        .p(space(3.0))
+        .rounded(px(radius::MD))
+        .bg(p.accent_soft)
+        .flex()
+        .items_center()
+        .gap(space(2.5))
+        .cursor_pointer()
+        .on_click(move |_, _, cx| cx.open_url(&url))
+        .child(icon("arrow-up", 16.0, p.accent_text))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .child(
+                    div()
+                        .text_size(px(type_scale::BODY))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(p.text)
+                        .child(format!("{what} {} çıktı", update.version)),
+                )
+                .child(
+                    div()
+                        .text_size(px(type_scale::SMALL))
+                        .text_color(p.text_secondary)
+                        .child("Yeni sürümü indir, kur ve uygulamayı yeniden aç."),
+                ),
+        )
+        .child(
+            div()
+                .text_size(px(type_scale::SMALL))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(p.accent_text)
+                .child("İndir"),
+        )
+        .into_any_element()
+}
+
 /// The big button. It does one thing at a time and says what.
-fn play_button(play: &Play, instance: Option<String>, cx: &mut Context<Shell>) -> AnyElement {
+fn play_button(
+    play: &Play,
+    instance: Option<String>,
+    height: f32,
+    cx: &mut Context<Shell>,
+) -> AnyElement {
     let p = cx.palette().clone();
     let (glyph, label, enabled): (&str, SharedString, bool) = match play {
         Play::SignIn => ("log-in", "Microsoft ile giriş yap".into(), true),
@@ -321,7 +504,7 @@ fn play_button(play: &Play, instance: Option<String>, cx: &mut Context<Shell>) -
     let main = div()
         .id("ibsmp-play")
         .flex_1()
-        .h(px(56.0))
+        .h(px(height))
         .rounded(px(radius::LG))
         .bg(bg)
         .flex()
@@ -351,7 +534,7 @@ fn play_button(play: &Play, instance: Option<String>, cx: &mut Context<Shell>) -
         row = row.child(
             div()
                 .id("ibsmp-stop")
-                .h(px(56.0))
+                .h(px(height))
                 .px(space(4.0))
                 .rounded(px(radius::LG))
                 .bg(p.danger_soft)
