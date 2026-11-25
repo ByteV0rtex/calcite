@@ -580,6 +580,7 @@ impl AppState {
                 }
                 if finished {
                     // The 9/IB SMP instance is ready (or updated): remember it.
+                    let ibsmp_job = self.pending_ibsmp.contains_key(&job.id);
                     if let Some(version) = self.pending_ibsmp.remove(&job.id) {
                         match job.instance_id.clone().filter(|_| succeeded) {
                             Some(instance_id) => {
@@ -610,7 +611,7 @@ impl AppState {
                         && succeeded
                         && let Some(instance_id) = job.instance_id.clone()
                     {
-                        self.add_server_and_join(instance_id, name, address, cx);
+                        self.add_server_and_join(instance_id, name, address, ibsmp_job, cx);
                     }
                     if let Some((game_dir, mods_dir)) = self.pending_copies.remove(&job.id)
                         && succeeded
@@ -1537,7 +1538,7 @@ impl AppState {
             let result = task.await;
             let _ = this.update(cx, |this, cx| {
                 match result {
-                    Ok(Join::Ready(id)) => this.add_server_and_join(id, name, address, cx),
+                    Ok(Join::Ready(id)) => this.add_server_and_join(id, name, address, false, cx),
                     Ok(Join::Installing(job)) => {
                         this.pending_joins
                             .insert(job.job_id.clone(), (name, address));
@@ -1559,10 +1560,14 @@ impl AppState {
         instance_id: String,
         name: String,
         address: String,
+        ibsmp: bool,
         cx: &mut Context<Self>,
     ) {
         let (id, target) = (instance_id.clone(), address.clone());
         let task = Backend::global(cx).call(async move {
+            if ibsmp && let Err(error) = crate::ibsmp::ensure_memory(&id).await {
+                tracing::warn!("couldn't set the 9/IB instance's memory: {error:#}");
+            }
             let listed = theseus::worlds::get_instance_worlds(&id)
                 .await
                 .unwrap_or_default()
@@ -1772,7 +1777,7 @@ impl AppState {
                         }
                         this.ibsmp.manifest = Some(manifest);
                         this.ibsmp.step = IbStep::Starting(std::time::Instant::now());
-                        this.add_server_and_join(id, name, address, cx);
+                        this.add_server_and_join(id, name, address, true, cx);
                     }
                     Ok(Next::Install(manifest, path, existing)) => {
                         this.ibsmp_install(manifest, path, existing, cx)

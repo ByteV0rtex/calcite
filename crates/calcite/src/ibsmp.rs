@@ -131,6 +131,37 @@ pub async fn download_pack(pack: &Pack, dir: &Path) -> anyhow::Result<PathBuf> {
     Ok(path)
 }
 
+/// How much memory the 9/IB pack gets: half the computer's, between 3 and
+/// 6 GB. The launcher's default (2 GB) is too little for Create, the guns
+/// and 40-odd other mods, and the game stutters or runs out of memory.
+pub fn recommended_memory_mb(system_mb: u64) -> u32 {
+    let half = (system_mb / 2 / 512 * 512) as u32;
+    half.clamp(3072, 6144)
+}
+
+/// Give the 9/IB instance enough memory, unless someone already chose a
+/// value for it in its settings. Needs the backend's tokio runtime.
+pub async fn ensure_memory(instance_id: &str) -> anyhow::Result<()> {
+    let Some(meta) = theseus::instance::get(instance_id).await? else {
+        return Ok(());
+    };
+    if meta.launch_overrides.memory.is_some() {
+        return Ok(());
+    }
+    let system_mb = theseus::jre::get_max_memory().await.unwrap_or(0) / 1024;
+    let maximum = recommended_memory_mb(system_mb);
+    let patch = theseus::data::EditInstance {
+        launch_overrides: Some(theseus::data::InstanceLaunchOverridesPatch {
+            memory: Some(Some(theseus::data::MemorySettings { maximum })),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    theseus::instance::edit(instance_id, patch).await?;
+    tracing::info!("9/IB instance memory set to {maximum} MB");
+    Ok(())
+}
+
 fn file_safe(version: &str) -> String {
     version
         .chars()
@@ -166,6 +197,15 @@ mod tests {
         assert_eq!(m.title(), "9/IB SMP Sezon 1.5");
         assert_eq!(m.news, None);
         assert_eq!(m.pack.version, "0.3-test");
+    }
+
+    #[test]
+    fn memory_is_half_the_computer_within_limits() {
+        assert_eq!(recommended_memory_mb(4096), 3072);
+        assert_eq!(recommended_memory_mb(8192), 4096);
+        assert_eq!(recommended_memory_mb(8000), 3584);
+        assert_eq!(recommended_memory_mb(16384), 6144);
+        assert_eq!(recommended_memory_mb(0), 3072);
     }
 
     #[test]
